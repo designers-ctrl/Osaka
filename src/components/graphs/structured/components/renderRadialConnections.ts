@@ -12,6 +12,7 @@ import * as d3 from 'd3'
 import type { PositionedNode } from '../useStructuredRenderer'
 import type { NetworkLink } from '@/components/charts'
 import { useStructuredGeometry } from '../useStructuredGeometry'
+import { STRUCTURED_CONNECTIONS } from '../structuredTokens'
 
 interface RadialConnectionConfig {
   centerX: number
@@ -45,9 +46,12 @@ export function renderRadialConnections(
     const midX = (x1 + x2) / 2
     const midY = (y1 + y2) / 2
 
-    // Control point: pull toward graph center (0, 0) by ~60%
-    // This creates the "edge bundling" effect — curves arc toward center rather than radiating outward
-    const bundleStrength = 0.6 // 0-1: higher = more pull toward center
+    // Control point: pull toward graph center (0, 0) by bundleStrength.
+    // This creates the "edge bundling" effect — curves arc toward center
+    // rather than radiating outward. The SAME token drives the endpoint
+    // perimeter-intersection math in useStructuredGeometry, so curves leave
+    // their nodes in exactly the direction the endpoints were computed for.
+    const bundleStrength = STRUCTURED_CONNECTIONS.bundleStrength
     const controlX = midX * (1 - bundleStrength)
     const controlY = midY * (1 - bundleStrength)
 

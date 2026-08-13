@@ -16,7 +16,7 @@ import { useD3Force } from './useD3Force'
 import { useD3Hierarchy } from './useD3Hierarchy'
 import { useD3Interaction } from './useD3Interaction'
 import { useD3Drag } from './useD3Drag'
-import { useStructuredRenderer } from './structured'
+import { useStructuredRenderer, STRUCTURED_VIEWPORT } from './structured'
 import { SOURCE_ICONS } from '@/data/graphWorkspace'
 import {
   VIEWPORT,
@@ -26,11 +26,13 @@ import {
   NODE_DIAMETERS,
   NODE_STYLING,
   ANIMATIONS,
-  getNodeRadiusForType,
+  getEffectiveNodeRadius,
   getNodeStrokeWidth,
   getLinkStrokeWidth,
-  getFontSize,
+  getScaledLabelFontSize,
   getIconDiameter,
+  getSourceNodeRadius,
+  getSourceIconDiameter,
   getInverseZoomScale,
   getConnectionEndpoints,
 } from './graphTokens'
@@ -50,6 +52,9 @@ interface Props {
 
 interface Emits {
   (e: 'cluster-click', nodeId: string): void
+  // Fired on every camera change with whether the viewport currently matches
+  // the initial fit-to-view framing (drives the Reset control's visibility)
+  (e: 'viewport-change', atInitialView: boolean): void
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -97,25 +102,23 @@ let isFirstInitialization = true
 let currentZoomTransform: d3.ZoomTransform | null = null
 let currentZoomScale: number = 1 // Track zoom scale for constant-screen rendering
 let previousNodeIds: Set<string> = new Set() // Track previous node set for diff detection
+// While true, the camera re-fits to the graph bounds on each simulation tick so
+// the whole graph stays in view while the force layout settles on first load.
+// Cleared on any user zoom/pan gesture, zoom button, or Timeline filter update.
+let followInitialFit = false
 let tickCount = 0 // === TEMPORARY DIAGNOSTIC: For tick monitoring ===
 
 // Dimensions
 const width = computed(() => containerRef.value?.clientWidth || 800)
 const scaledHeight = computed(() => Math.max(320, props.height))
 
-// Helper to get node radius from node data (accounts for variable sizes)
+// Effective rendered node radius at the CURRENT zoom level — delegates to
+// graphTokens' single source of truth, so link endpoint geometry (every
+// getConnectionEndpoints call site below) always matches the radius the
+// circle is actually drawn with, including the source nodes' minimum
+// screen-size clamp at low zoom.
 function getNodeRadiusFromData(node: NetworkNode): number {
-  if (node.kind === 'cluster') {
-    if ((node as any).weight !== undefined) {
-      return getNodeRadiusForType(node.kind, (node as any).weight, true)
-    } else if ((node as any).entityCount !== undefined) {
-      return getNodeRadiusForType(node.kind, (node as any).entityCount, false)
-    }
-  }
-  if (node.kind === 'insight' && node.size) {
-    return getNodeRadiusForType(node.kind, node.size)
-  }
-  return getNodeRadiusForType(node.kind)
+  return getEffectiveNodeRadius(node as any, currentZoomScale)
 }
 
 // Layout nodes based on mode
@@ -129,6 +132,82 @@ const layoutNodes = computed(() => {
   }
   return props.nodes
 })
+
+/**
+ * Compute the initial camera transform. Single source of truth for the
+ * first-entry framing — used on load (resetZoom), by resetView(), and by the
+ * settle-follow refit below.
+ *
+ * Unstructured: a true fit-to-view over the rendered bounds of every visible
+ * node (position ± radius, padded by VIEWPORT.initialZoom.fitPadding), centered.
+ * Computed in viewBox units — the space the zoom transform actually operates
+ * in, since the SVG carries a `viewBox` of dataWidth × dataHeight — so the
+ * framing is correct regardless of the container's pixel size.
+ *
+ * Structured: its own camera, derived from the Structured graph's bounds.
+ * The radial layout is drawn around origin (0,0) with a known outer visual
+ * radius (cluster ring + labels, STRUCTURED_VIEWPORT.outerRadius), so the
+ * fit is: translate origin to the viewBox center, scale so the full circle
+ * (padded) fits the viewBox's smaller dimension. Ring coordinates are never
+ * shifted — only this camera transform.
+ */
+function computeInitialTransform(): d3.ZoomTransform {
+  if (props.layoutMode === 'structured') {
+    const contentRadius = STRUCTURED_VIEWPORT.outerRadius + STRUCTURED_VIEWPORT.fitPadding
+    const scale = Math.min(VIEWPORT.dataWidth, VIEWPORT.dataHeight) / (2 * contentRadius)
+    return d3.zoomIdentity
+      .translate(VIEWPORT.dataWidth / 2, VIEWPORT.dataHeight / 2)
+      .scale(scale)
+  }
+
+  if (props.layoutMode === 'unstructured') {
+    // Bounds of all visible rendered nodes in data space
+    let minX = Infinity
+    let minY = Infinity
+    let maxX = -Infinity
+    let maxY = -Infinity
+    for (const n of layoutNodes.value as any[]) {
+      if (n.kind === 'entity') continue // entities are never rendered
+      if (typeof n.x !== 'number' || typeof n.y !== 'number') continue
+      // Base-size radius (zoom 1): initial-fit bounds are zoom-independent.
+      const r = getEffectiveNodeRadius(n, 1)
+      if (n.x - r < minX) minX = n.x - r
+      if (n.y - r < minY) minY = n.y - r
+      if (n.x + r > maxX) maxX = n.x + r
+      if (n.y + r > maxY) maxY = n.y + r
+    }
+
+    if (Number.isFinite(minX)) {
+      const pad = VIEWPORT.initialZoom.fitPadding
+      minX -= pad
+      minY -= pad
+      maxX += pad
+      maxY += pad
+      const boundsWidth = maxX - minX
+      const boundsHeight = maxY - minY
+      const scale = Math.min(VIEWPORT.dataWidth / boundsWidth, VIEWPORT.dataHeight / boundsHeight)
+      // Center the padded bounds inside the viewBox
+      const tx = (VIEWPORT.dataWidth - boundsWidth * scale) / 2 - minX * scale
+      const ty = (VIEWPORT.dataHeight - boundsHeight * scale) / 2 - minY * scale
+      return d3.zoomIdentity.translate(tx, ty).scale(scale)
+    }
+    // No positioned nodes yet: fall through to the container-fit fallback below
+  }
+
+  const containerRect = containerRef.value?.getBoundingClientRect()
+  const containerWidth = containerRect?.width || 1200
+  const containerHeight = containerRect?.height || 600
+
+  // Scale to fit entire data space in viewport with generous margin (from graphTokens)
+  const scaleX = containerWidth / VIEWPORT.dataWidth
+  const scaleY = containerHeight / VIEWPORT.dataHeight
+  const initialScale = Math.min(scaleX, scaleY) * VIEWPORT.initialZoom.marginMultiplier
+
+  // Center the view
+  const initialTx = (containerWidth - VIEWPORT.dataWidth * initialScale) / 2
+  const initialTy = (containerHeight - VIEWPORT.dataHeight * initialScale) / 2
+  return d3.zoomIdentity.translate(initialTx, initialTy).scale(initialScale)
+}
 
 /**
  * Initialize or update the D3 visualization.
@@ -155,6 +234,12 @@ function initializeVisualization(resetZoom = true) {
   if (props.layoutMode === 'structured') {
     console.log(`[D3] Structured layout mode detected → delegating to useStructuredRenderer`)
     svg.selectAll('*').remove() // Clear SVG before structured render
+
+    // Same viewBox as unstructured, set explicitly so structured never
+    // depends on a previous unstructured render having configured the SVG.
+    svg.attr('viewBox', [0, 0, dataWidth, dataHeight])
+      .attr('preserveAspectRatio', 'xMidYMid meet')
+      .style('pointer-events', 'all')
 
     renderStructured(svgRef.value, layoutNodes.value as any, props.links, {
       width: VIEWPORT.dataWidth,
@@ -421,24 +506,9 @@ function initializeVisualization(resetZoom = true) {
     .attr('class', 'node-circle')
     .attr('cx', (d: any) => d.x || 0)
     .attr('cy', (d: any) => d.y || 0)
-    .attr('r', (d: any) => {
-      // Clusters have dynamic size based on weight (or entityCount as fallback)
-      if (d.kind === 'cluster') {
-        if ((d as any).weight !== undefined) {
-          // Weight (0-100) takes precedence for radius calculation
-          return getNodeRadiusForType(d.kind, (d as any).weight, true)
-        } else if ((d as any).entityCount !== undefined) {
-          // Fall back to entityCount if weight not available
-          return getNodeRadiusForType(d.kind, (d as any).entityCount, false)
-        }
-      }
-      // Insights have dynamic size based on strength (size value)
-      if (d.kind === 'insight' && d.size) {
-        return getNodeRadiusForType(d.kind, d.size)
-      }
-      // All other nodes use fixed sizes
-      return getNodeRadiusForType(d.kind)
-    })
+    // Single source of truth: same effective radius the link endpoint
+    // geometry uses (includes the source nodes' 16px min screen diameter).
+    .attr('r', (d: any) => getEffectiveNodeRadius(d, currentZoomScale))
     .attr('fill', (d: any) => {
       const style = NODE_STYLING[d.kind as keyof typeof NODE_STYLING]
       if (style?.fill === 'none') return 'none'
@@ -461,11 +531,11 @@ function initializeVisualization(resetZoom = true) {
     .attr('opacity', 1)
     .style('pointer-events', 'auto')
 
-  // Add icons to source and document nodes (unified styling)
-  // Icons are centered on the node - offset by half their size
-  // Apply inverse zoom scale to keep icons constant visual size
-  const iconDiameter = getIconDiameter('source', currentZoomScale)
-  const iconHalfSize = iconDiameter / 2
+  // Add icons to source and document nodes, centered on the node.
+  // Both live in data space at their base token size so they scale naturally
+  // with their node when zooming (no inverse-zoom compensation).
+  const sourceIconDiameter = getSourceIconDiameter(currentZoomScale)
+  const documentIconDiameter = getIconDiameter('document')
   nodes.each(function (this: any, nodeData: any) {
     const parentNode = this.parentNode as SVGElement | null
     if (!parentNode) return
@@ -478,14 +548,16 @@ function initializeVisualization(resetZoom = true) {
       iconHref = nodeData.sourceIcon
     }
 
-    // Render icon with unified styling
+    // Render icon (class + size differ by kind, see comment above)
     if (iconHref) {
+      const isSource = nodeData.kind === 'source'
+      const iconDiameter = isSource ? sourceIconDiameter : documentIconDiameter
       d3.select(parentNode as any)
         .insert('image', ':first-child')
         .datum(nodeData)
-        .attr('class', 'source-icon')
-        .attr('x', (nodeData.x || 0) - iconHalfSize)
-        .attr('y', (nodeData.y || 0) - iconHalfSize)
+        .attr('class', isSource ? 'source-icon' : 'document-icon')
+        .attr('x', (nodeData.x || 0) - iconDiameter / 2)
+        .attr('y', (nodeData.y || 0) - iconDiameter / 2)
         .attr('width', iconDiameter)
         .attr('height', iconDiameter)
         .attr('href', iconHref)
@@ -505,7 +577,7 @@ function initializeVisualization(resetZoom = true) {
     .attr('text-anchor', 'start')
     .attr('dominant-baseline', 'middle')
     .attr('font-family', TYPOGRAPHY.source.fontFamily)
-    .attr('font-size', getFontSize('source', currentZoomScale))
+    .attr('font-size', getScaledLabelFontSize('source', currentZoomScale))
     .attr('font-style', TYPOGRAPHY.source.fontStyle)
     .attr('font-weight', TYPOGRAPHY.source.fontWeight)
     .attr('fill', chartTheme.value.ink)
@@ -528,7 +600,7 @@ function initializeVisualization(resetZoom = true) {
     .attr('text-anchor', 'start')
     .attr('dominant-baseline', 'middle')
     .attr('font-family', TYPOGRAPHY.document.fontFamily)
-    .attr('font-size', getFontSize('document', currentZoomScale))
+    .attr('font-size', getScaledLabelFontSize('document', currentZoomScale))
     .attr('font-style', TYPOGRAPHY.document.fontStyle)
     .attr('font-weight', TYPOGRAPHY.document.fontWeight)
     .attr('fill', chartTheme.value.ink)
@@ -539,22 +611,71 @@ function initializeVisualization(resetZoom = true) {
     .style('-webkit-text-stroke-width', `${(TYPOGRAPHY.document as any).textStrokeWidth}px`)
     .text((d: any) => d.label || d.id)
 
+  // Keep endpoint dots in sync with the link highlight state: dots belonging to
+  // unrelated/dimmed links are fully hidden while a node is hovered/selected,
+  // and restored to their default appearance when the highlight clears.
+  // Opacity only — link geometry and getConnectionEndpoints() are untouched.
+  const applyEndpointSelection = (selectedNodes: Set<string>) => {
+    svg.selectAll('circle.link-endpoint').attr('opacity', (d: any) => {
+      if (selectedNodes.size === 0) return LINK_STYLING.endpoints.opacity
+      return (selectedNodes.has(d.source.id) && selectedNodes.has(d.target.id))
+        ? LINK_STYLING.endpoints.opacity
+        : 0
+    })
+  }
+
+  // Keep labels in sync with the same connected-node set the node/link/endpoint
+  // highlight uses: the hovered node's and its direct neighbors' labels stay at
+  // full emphasis, all others dim to the low-emphasis opacity the dimmed nodes
+  // use (0.2, see applyNodeSelection). Opacity only — labels stay in the DOM,
+  // so there is no layout shift; an empty set restores the normal opacities.
+  const applyLabelSelection = (selectedNodes: Set<string>) => {
+    const dimmed = 0.2
+    svg.selectAll('text.source-label')
+      .attr('opacity', (d: any) =>
+        selectedNodes.size === 0 || selectedNodes.has(d.id) ? TYPOGRAPHY.source.opacity : dimmed)
+    svg.selectAll('text.document-label')
+      .attr('opacity', (d: any) =>
+        selectedNodes.size === 0 || selectedNodes.has(d.id) ? TYPOGRAPHY.document.opacity : dimmed)
+  }
+
+  // Keep node icons in sync with the same connected-node set: icons inside the
+  // hovered node and its direct neighbors stay fully visible, icons inside
+  // unrelated (dimmed) nodes dim with their node instead of staying bright.
+  // Icons are rendered as siblings of the node circles (not per-node groups),
+  // so their opacity is synced per element like labels/endpoints. Covers every
+  // Unstructured node icon (source + document images).
+  const applyIconSelection = (selectedNodes: Set<string>) => {
+    svg.selectAll('image.source-icon, image.document-icon')
+      .attr('opacity', (d: any) =>
+        selectedNodes.size === 0 || selectedNodes.has(d.id) ? SOURCE_NODES.icon.opacity : 0.2)
+  }
+
   // Handle hover highlighting
   const handleNodeHover = (nodeId: string | null, allNodes: NetworkNode[], allLinks: any[]) => {
     if (nodeId) {
       const connected = highlightConnectedNodes(nodeId, allNodes, allLinks)
       applyNodeSelection(nodes, connected)
       applyLinkSelection(links, linksBackground, connected)
+      applyEndpointSelection(connected)
+      applyLabelSelection(connected)
+      applyIconSelection(connected)
     } else {
       // Clear hover highlight, but keep click selection if active
       if (selectedCluster.value) {
         const connected = highlightConnectedNodes(selectedCluster.value, allNodes, allLinks)
         applyNodeSelection(nodes, connected)
         applyLinkSelection(links, linksBackground, connected)
+        applyEndpointSelection(connected)
+        applyLabelSelection(connected)
+        applyIconSelection(connected)
       } else {
         const empty = new Set<string>()
         applyNodeSelection(nodes, empty)
         applyLinkSelection(links, linksBackground, empty)
+        applyEndpointSelection(empty)
+        applyLabelSelection(empty)
+        applyIconSelection(empty)
       }
     }
   }
@@ -571,10 +692,16 @@ function initializeVisualization(resetZoom = true) {
         highlightedNodes.value = connected
         applyNodeSelection(nodes, connected)
         applyLinkSelection(links, linksBackground, connected)
+        applyEndpointSelection(connected)
+        applyLabelSelection(connected)
+        applyIconSelection(connected)
       } else {
         highlightedNodes.value.clear()
         applyNodeSelection(nodes, highlightedNodes.value)
         applyLinkSelection(links, linksBackground, highlightedNodes.value)
+        applyEndpointSelection(highlightedNodes.value)
+        applyLabelSelection(highlightedNodes.value)
+        applyIconSelection(highlightedNodes.value)
       }
     },
     handleNodeHover,
@@ -597,6 +724,11 @@ function initializeVisualization(resetZoom = true) {
 
     // Apply drag behavior to nodes
     nodes.call(createDragBehavior(simulation))
+    // Grabbing a node restarts the simulation — hand the camera to the user
+    // so the settle-follow refit can't fight the drag.
+    nodes.on('pointerdown.followfit', () => {
+      followInitialFit = false
+    })
 
     simulation.on('tick', () => {
       // === TEMPORARY DIAGNOSTIC: TICK MONITORING ===
@@ -706,12 +838,15 @@ function initializeVisualization(resetZoom = true) {
         .attr('cx', (d: any) => d.x || 0)
         .attr('cy', (d: any) => d.y || 0)
 
-      // Update icons with constant visual size (inverse zoom applied)
-      const iconDiam = getIconDiameter('source', currentZoomScale)
-      const iconHalf = iconDiam / 2
+      // Update icon positions (both icon kinds at natural data-space size)
+      const sourceIconHalf = getSourceIconDiameter(currentZoomScale) / 2
       svg.selectAll('image.source-icon')
-        .attr('x', (d: any) => (d.x || 0) - iconHalf)
-        .attr('y', (d: any) => (d.y || 0) - iconHalf)
+        .attr('x', (d: any) => (d.x || 0) - sourceIconHalf)
+        .attr('y', (d: any) => (d.y || 0) - sourceIconHalf)
+      const documentIconHalf = getIconDiameter('document') / 2
+      svg.selectAll('image.document-icon')
+        .attr('x', (d: any) => (d.x || 0) - documentIconHalf)
+        .attr('y', (d: any) => (d.y || 0) - documentIconHalf)
 
       // Update source labels with graphTokens positioning
       g.select('g.labels').selectAll('text.source-label')
@@ -722,6 +857,17 @@ function initializeVisualization(resetZoom = true) {
       g.select('g.labels').selectAll('text.document-label')
         .attr('x', (d: any) => (d.x || 0) + TYPOGRAPHY.document.offsetX)
         .attr('y', (d: any) => (d.y || 0) + TYPOGRAPHY.document.offsetY)
+
+      // First-load framing: keep the whole graph in view while the layout
+      // settles. Camera-only — node positions and physics are untouched. Stops
+      // once the simulation has cooled (or on any user interaction, see the
+      // zoom handler / applyZoomScale / updateVisualizationForFilter).
+      if (followInitialFit && zoomBehaviorInstance) {
+        if (simulation && simulation.alpha() < 0.05) {
+          followInitialFit = false
+        }
+        svg.call(zoomBehaviorInstance.transform, computeInitialTransform())
+      }
     })
   } else {
     // Static hierarchical layout
@@ -798,12 +944,15 @@ function initializeVisualization(resetZoom = true) {
         return d.endpoint === 'source' ? endpoints.source.y : endpoints.target.y
       })
 
-    // Position icons with constant visual size (inverse zoom applied)
-    const iconDiam = getIconDiameter('source', currentZoomScale)
-    const iconHalf = iconDiam / 2
+    // Position icons (both icon kinds at natural data-space size)
+    const sourceIconHalf = getSourceIconDiameter(currentZoomScale) / 2
     svg.selectAll('image.source-icon')
-      .attr('x', (d: any) => (d.x || 0) - iconHalf)
-      .attr('y', (d: any) => (d.y || 0) - iconHalf)
+      .attr('x', (d: any) => (d.x || 0) - sourceIconHalf)
+      .attr('y', (d: any) => (d.y || 0) - sourceIconHalf)
+    const documentIconHalf = getIconDiameter('document') / 2
+    svg.selectAll('image.document-icon')
+      .attr('x', (d: any) => (d.x || 0) - documentIconHalf)
+      .attr('y', (d: any) => (d.y || 0) - documentIconHalf)
 
     // Position labels using graphTokens offsets
     labelGroup.selectAll('text.source-label')
@@ -830,6 +979,11 @@ function initializeVisualization(resetZoom = true) {
     })
     .on('zoom', (event) => {
       console.log(`[D3 Zoom Event] scale=${event.transform.k}, tx=${event.transform.x}, ty=${event.transform.y}`)
+      // A real user gesture (wheel/drag — sourceEvent present) takes over the
+      // camera: stop the first-load settle-follow refit.
+      if (event.sourceEvent) {
+        followInitialFit = false
+      }
       currentZoomTransform = event.transform
       currentZoomScale = event.transform.k // Track zoom scale for constant-screen rendering
 
@@ -849,21 +1003,50 @@ function initializeVisualization(resetZoom = true) {
         // Update node stroke widths
         nodes.attr('stroke-width', (d: any) => getNodeStrokeWidth(d.kind, currentZoomScale))
 
-        // Update icon sizes (constant visual size)
-        const iconDiam = getIconDiameter('source', currentZoomScale)
-        const iconHalf = iconDiam / 2
+        // Source circles + icons hold their 16px minimum on-screen diameter:
+        // at normal zoom both keep their base size and scale naturally; when
+        // zoomed out past the clamp they resize together, preserving
+        // `icon + 2 × padding = node diameter`. Document icons stay untouched
+        // (base size in data space, natural scaling).
+        nodes.filter((d: any) => d.kind === 'source')
+          .attr('r', getSourceNodeRadius(currentZoomScale))
+        const srcIconDiam = getSourceIconDiameter(currentZoomScale)
+        const srcIconHalf = srcIconDiam / 2
         svg.selectAll('image.source-icon')
-          .attr('width', iconDiam)
-          .attr('height', iconDiam)
-          .attr('x', (d: any) => (d.x || 0) - iconHalf)
-          .attr('y', (d: any) => (d.y || 0) - iconHalf)
+          .attr('width', srcIconDiam)
+          .attr('height', srcIconDiam)
+          .attr('x', (d: any) => (d.x || 0) - srcIconHalf)
+          .attr('y', (d: any) => (d.y || 0) - srcIconHalf)
 
-        // Update label font sizes (constant visual size)
+        // Keep link geometry on the node boundary: the source nodes'
+        // EFFECTIVE radius is zoom-dependent (16px minimum screen diameter),
+        // so every endpoint touching a source moves when the zoom scale
+        // changes. Same single source of truth as the circle radii above.
+        // Re-query the DOM (like the tick handler) so links added by
+        // timeline filtering are included.
+        const endpointsFor = (d: any) => getConnectionEndpoints(
+          d.source, d.target,
+          getNodeRadiusFromData(d.source), getNodeRadiusFromData(d.target),
+          undefined, currentZoomScale,
+        )
+        const viewportSel = svg.select('g.viewport')
+        const setLineGeometry = (sel: any) => sel
+          .attr('x1', (d: any) => endpointsFor(d).source.x)
+          .attr('y1', (d: any) => endpointsFor(d).source.y)
+          .attr('x2', (d: any) => endpointsFor(d).target.x)
+          .attr('y2', (d: any) => endpointsFor(d).target.y)
+        setLineGeometry(viewportSel.selectAll('line.link-line-foreground'))
+        setLineGeometry(viewportSel.selectAll('line.link-line-background'))
+        viewportSel.selectAll('circle.link-endpoint')
+          .attr('cx', (d: any) => d.endpoint === 'source' ? endpointsFor(d).source.x : endpointsFor(d).target.x)
+          .attr('cy', (d: any) => d.endpoint === 'source' ? endpointsFor(d).source.y : endpointsFor(d).target.y)
+
+        // Update label font sizes (natural scaling with an 11px on-screen floor)
         labelGroup.selectAll('text.source-label')
-          .attr('font-size', getFontSize('source', currentZoomScale))
+          .attr('font-size', getScaledLabelFontSize('source', currentZoomScale))
 
         labelGroup.selectAll('text.document-label')
-          .attr('font-size', getFontSize('document', currentZoomScale))
+          .attr('font-size', getScaledLabelFontSize('document', currentZoomScale))
 
         // Re-setup link interaction with current zoom scale for hover effects
         setupLinkInteraction(links, linksBackground, currentZoomScale)
@@ -873,6 +1056,14 @@ function initializeVisualization(resetZoom = true) {
       if (g) {
         g.attr('transform', event.transform)
       }
+
+      // Tell the parent whether the camera sits at the initial fit-to-view
+      // framing (epsilon compare — +/- zoom pairs and Reset land back exactly)
+      const initial = computeInitialTransform()
+      emit('viewport-change',
+        Math.abs(event.transform.k - initial.k) < 1e-3
+        && Math.abs(event.transform.x - initial.x) < 0.5
+        && Math.abs(event.transform.y - initial.y) < 0.5)
     })
 
   svg.call(zoomBehaviorInstance)
@@ -908,23 +1099,12 @@ function initializeVisualization(resetZoom = true) {
 
   // Apply zoom: either reset to fit viewport or restore previous transform
   if (resetZoom) {
-    // Initialize to show full data space with padding
-    const containerRect = containerRef.value?.getBoundingClientRect()
-    const containerWidth = containerRect?.width || 1200
-    const containerHeight = containerRect?.height || 600
-
-    // Calculate scale to fit entire data space in viewport with generous margin (from graphTokens)
-    const scaleX = containerWidth / dataWidth
-    const scaleY = containerHeight / dataHeight
-    const initialScale = Math.min(scaleX, scaleY) * VIEWPORT.initialZoom.marginMultiplier
-
-    // Center the view
-    const initialTx = (containerWidth - dataWidth * initialScale) / 2
-    const initialTy = (containerHeight - dataHeight * initialScale) / 2
-    const transform = d3.zoomIdentity.translate(initialTx, initialTy).scale(initialScale)
-    console.log(`[D3] Applying RESET zoom: scale=${initialScale}, tx=${initialTx}, ty=${initialTy}, container=${containerWidth}x${containerHeight}`)
+    const transform = computeInitialTransform()
+    console.log(`[D3] Applying RESET zoom: scale=${transform.k}, tx=${transform.x}, ty=${transform.y}`)
     currentZoomTransform = transform
     svg.call(zoomBehaviorInstance!.transform, transform)
+    // Keep the whole graph framed while the force layout settles (unstructured only)
+    followInitialFit = props.layoutMode === 'unstructured'
   } else if (currentZoomTransform) {
     // Restore previous zoom state
     console.log(`[D3] Restoring zoom transform: scale=${currentZoomTransform.k}, tx=${currentZoomTransform.x}, ty=${currentZoomTransform.y}`)
@@ -941,6 +1121,9 @@ function initializeVisualization(resetZoom = true) {
 function updateVisualizationForFilter(newNodes: NetworkNode[], newLinks: NetworkLink[]) {
   console.log(`[D3] updateVisualizationForFilter called: ${newNodes.length} nodes, ${newLinks.length} links`)
   if (!svgRef.value) return
+  // Timeline filtering preserves the viewport — never let the settle-follow
+  // refit fight the gentle simulation restart below.
+  followInitialFit = false
 
   const svg = d3.select(svgRef.value)
   const newNodeIds = new Set(newNodes.map(n => n.id))
@@ -996,6 +1179,8 @@ function updateVisualizationForFilter(newNodes: NetworkNode[], newLinks: Network
   const nodes = nodeGroup.selectAll('circle.node-circle').data(visibleNodes, (d: any) => d.id)
 
   // Remove nodes that are no longer visible
+  const nodeExitCount = nodes.exit().size()
+  const nodeEnterCount = nodes.enter().size()
   nodes.exit().remove()
 
   // Add new nodes (those that became visible due to Timeline change)
@@ -1004,19 +1189,9 @@ function updateVisualizationForFilter(newNodes: NetworkNode[], newLinks: Network
     .attr('class', 'node-circle')
     .attr('cx', (d: any) => d.x || 0)
     .attr('cy', (d: any) => d.y || 0)
-    .attr('r', (d: any) => {
-      if (d.kind === 'cluster') {
-        if ((d as any).weight !== undefined) {
-          return getNodeRadiusForType(d.kind, (d as any).weight, true)
-        } else if ((d as any).entityCount !== undefined) {
-          return getNodeRadiusForType(d.kind, (d as any).entityCount, false)
-        }
-      }
-      if (d.kind === 'insight' && d.size) {
-        return getNodeRadiusForType(d.kind, d.size)
-      }
-      return getNodeRadiusForType(d.kind)
-    })
+    // Single source of truth: same effective radius the link endpoint
+    // geometry uses (includes the source nodes' 16px min screen diameter).
+    .attr('r', (d: any) => getEffectiveNodeRadius(d, currentZoomScale))
     .attr('fill', (d: any) => {
       const style = NODE_STYLING[d.kind as keyof typeof NODE_STYLING]
       if (style?.fill === 'none') return 'none'
@@ -1236,7 +1411,7 @@ function updateVisualizationForFilter(newNodes: NetworkNode[], newLinks: Network
     .attr('text-anchor', 'start')
     .attr('dominant-baseline', 'middle')
     .attr('font-family', TYPOGRAPHY.source.fontFamily)
-    .attr('font-size', getFontSize('source', currentZoomScale))
+    .attr('font-size', getScaledLabelFontSize('source', currentZoomScale))
     .attr('font-style', TYPOGRAPHY.source.fontStyle)
     .attr('font-weight', TYPOGRAPHY.source.fontWeight)
     .attr('fill', chartTheme.value.ink)
@@ -1252,7 +1427,7 @@ function updateVisualizationForFilter(newNodes: NetworkNode[], newLinks: Network
     .attr('text-anchor', 'start')
     .attr('dominant-baseline', 'middle')
     .attr('font-family', TYPOGRAPHY.document.fontFamily)
-    .attr('font-size', getFontSize('document', currentZoomScale))
+    .attr('font-size', getScaledLabelFontSize('document', currentZoomScale))
     .attr('font-style', TYPOGRAPHY.document.fontStyle)
     .attr('font-weight', TYPOGRAPHY.document.fontWeight)
     .attr('fill', chartTheme.value.ink)
@@ -1262,16 +1437,16 @@ function updateVisualizationForFilter(newNodes: NetworkNode[], newLinks: Network
     .style('-webkit-text-stroke-width', `${(TYPOGRAPHY.document as any).textStrokeWidth}px`)
     .text((d: any) => d.label || d.id)
 
-  // Add icons to newly visible nodes
-  const iconDiameter = getIconDiameter('source', currentZoomScale)
-  const iconHalfSize = iconDiameter / 2
-  svg.selectAll('image.source-icon').data(visibleNodes.filter((n: any) => n.kind === 'source' || n.kind === 'document'), (d: any) => d.id)
+  // Add icons to newly visible nodes (both kinds at natural data-space size)
+  const sourceIconDiameter = getSourceIconDiameter(currentZoomScale)
+  const documentIconDiameter = getIconDiameter('document')
+  svg.selectAll('image.source-icon, image.document-icon').data(visibleNodes.filter((n: any) => n.kind === 'source' || n.kind === 'document'), (d: any) => d.id)
     .exit().remove()
 
   nodes.each(function (nodeData: any) {
     const parentNode = (this as any).parentNode as SVGElement | null
     if (!parentNode) return
-    const existingIcon = d3.select(parentNode as any).select('image.source-icon')
+    const existingIcon = d3.select(parentNode as any).select('image.source-icon, image.document-icon')
     if (existingIcon.empty()) {
       // Only add if it doesn't exist
       let iconHref: string | null = null
@@ -1282,12 +1457,14 @@ function updateVisualizationForFilter(newNodes: NetworkNode[], newLinks: Network
       }
 
       if (iconHref) {
+        const isSource = nodeData.kind === 'source'
+        const iconDiameter = isSource ? sourceIconDiameter : documentIconDiameter
         d3.select(parentNode as any)
           .insert('image', ':first-child')
           .datum(nodeData)
-          .attr('class', 'source-icon')
-          .attr('x', (nodeData.x || 0) - iconHalfSize)
-          .attr('y', (nodeData.y || 0) - iconHalfSize)
+          .attr('class', isSource ? 'source-icon' : 'document-icon')
+          .attr('x', (nodeData.x || 0) - iconDiameter / 2)
+          .attr('y', (nodeData.y || 0) - iconDiameter / 2)
           .attr('width', iconDiameter)
           .attr('height', iconDiameter)
           .attr('href', iconHref)
@@ -1322,14 +1499,22 @@ function updateVisualizationForFilter(newNodes: NetworkNode[], newLinks: Network
     console.log(`[D3-COMPARE] NO LINKS FOUND IN FOREGROUND!`)
   }
 
-  // Update simulation links if simulation is running (for unstructured layout)
+  // Update simulation links if simulation is running (for unstructured layout).
+  // Only reheat when the visible set actually changed, and only gently (0.1):
+  // a filter that adds/removes nothing must not restart the simulation, and an
+  // incremental change should integrate new nodes without noticeably moving
+  // the existing, already-settled ones.
   if (simulation && props.layoutMode === 'unstructured') {
-    console.log(`[D3] Updating simulation with ${linkData.length} links and ${visibleNodes.length} nodes`)
-    simulation.nodes(visibleNodes)
-    // Pass linkData which has stable node object references (not stale IDs)
-    const linkForce = simulation.force('link') as any
-    linkForce?.links(linkData)
-    simulation.alpha(0.3).restart() // Gentle restart with low alpha to let it settle
+    const visibleSetChanged = nodeEnterCount > 0 || nodeExitCount > 0
+      || linksForegroundEnterCount > 0 || linksForegroundExitCount > 0
+    console.log(`[D3] Updating simulation with ${linkData.length} links and ${visibleNodes.length} nodes (setChanged=${visibleSetChanged})`)
+    if (visibleSetChanged) {
+      simulation.nodes(visibleNodes)
+      // Pass linkData which has stable node object references (not stale IDs)
+      const linkForce = simulation.force('link') as any
+      linkForce?.links(linkData)
+      simulation.alpha(0.1).restart() // Gentle restart with low alpha to let it settle
+    }
   }
 
   console.log(`[D3] updateVisualizationForFilter complete`)
@@ -1407,12 +1592,26 @@ onBeforeUnmount(() => {
 
 function applyZoomScale(factor: number) {
   if (!svgRef.value || !zoomBehaviorInstance) return
+  followInitialFit = false // Explicit zoom takes over the camera
   const svg = d3.select(svgRef.value)
   svg.call(zoomBehaviorInstance.scaleBy, factor)
 }
 
+/**
+ * Reset the camera to the exact initial-entry framing: the same fit-to-view
+ * transform (scale + centered translate) computeInitialTransform() produces on
+ * first load. Viewport-only: does not touch the simulation, node positions, or data.
+ */
+function resetView() {
+  if (!svgRef.value || !zoomBehaviorInstance) return
+  followInitialFit = false
+  const svg = d3.select(svgRef.value)
+  svg.call(zoomBehaviorInstance.transform, computeInitialTransform())
+}
+
 defineExpose({
   applyZoomScale,
+  resetView,
 })
 </script>
 

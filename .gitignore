@@ -30,3 +30,5 @@ pnpm-debug.log*
 
 # Vite / build caches
 .vite/
+.vercel
+.env*

@@ -97,7 +97,9 @@ const zoom = ref(1)
 /** Which hour of the time rail the canvas is scoped to. */
 const currentHour = ref(data.timeline.findIndex(h => h.current))
 /** Period selection: start and end hour indices. Initialized to default. */
-const selectedPeriod = ref<{ start: number, end: number } | null>(data.defaultPeriod)
+// Initial selection: 02 PM → 07 PM (slot indices 1–5; the window's bottom edge
+// sits on end+1's hour line). Temporarily overrides data.defaultPeriod.
+const selectedPeriod = ref<{ start: number, end: number } | null>({ start: 1, end: 5 })
 /** Track which handle is being dragged. */
 const draggingHandle = ref<'start' | 'end' | null>(null)
 /** Track which cluster is selected to show the overlay. */
@@ -193,9 +195,17 @@ const legendColor = computed(() => (ink: 'insight' | 'entity' | 'structure') => 
   return withAlpha(t.ink, 0.55)
 })
 
+/**
+ * TEMP: timeline→graph filtering is DISABLED. The timeline UI (selection,
+ * handles, drag) keeps working visually, but the graph always receives the
+ * full dataset. To restore filtering, set this flag back to false — the
+ * filtering logic below is intact and untouched.
+ */
+const TIMELINE_FILTERING_DISABLED = true
+
 /** Filter nodes to those relevant to the selected time period. */
 const filteredNodes = computed(() => {
-  const period = selectedPeriod.value
+  const period = TIMELINE_FILTERING_DISABLED ? null : selectedPeriod.value
   const result = !period ? data.nodes : data.nodes.filter(node => {
     // Nodes without a timeRange are always shown (sources, documents)
     if (!node.timeRange) return true
@@ -217,6 +227,20 @@ const filteredLinks = computed(() => {
 function zoomBy(factor: number) {
   graphRef.value?.applyZoomScale(factor)
 }
+
+/** Restore the camera to the initial-entry framing (viewport only). */
+function resetGraphView() {
+  graphRef.value?.resetView()
+}
+
+/**
+ * Reset is only offered once the user has moved the camera away from the
+ * initial fit-to-view framing (pan, wheel zoom, or the +/- controls). The
+ * graph reports every camera change with whether it matches the initial
+ * framing, so simulation-driven settling never shows the button, and
+ * resetting (or landing back exactly) hides it again.
+ */
+const viewportChanged = ref(false)
 
 /**
  * Where inside an hour slot each insight dot sits, as 0–1 fractions.
@@ -325,12 +349,14 @@ function send() {
           :sentiment-percent="sentimentMeter?.ratio ? sentimentMeter.ratio * 100 : undefined"
           :sentiment-label="sentimentMeter?.label"
           @cluster-click="handleClusterClick"
+          @viewport-change="viewportChanged = !$event"
         />
         <!-- The canvas summary in text, for keyboard and screen-reader users. -->
         <p class="d-sr-only">{{ graphSummary }}</p>
 
-        <!-- Brand chip — floats, like all canvas chrome -->
-        <v-sheet class="chrome chrome--brand surface--brand d-flex align-center">
+        <!-- Brand chip + Reset — float together at the top-left, 16px apart -->
+        <div class="chrome chrome--brand-row d-flex align-center ga-4">
+        <v-sheet class="chrome--brand surface--brand d-flex align-center">
           <div class="d-flex align-center ga-3 pa-3">
           <img :src="logoUrl" :alt="`${brand.identity.name} logo`" width="32" height="32">
           <div class="mr-2">
@@ -364,6 +390,11 @@ function send() {
           />
           </div>
         </v-sheet>
+        <AppButton v-if="viewportChanged" variant="secondary" size="m" @click="resetGraphView">
+          <template #icon><v-icon icon="refresh" /></template>
+          Reset
+        </AppButton>
+        </div>
 
         <!-- Canvas toolbar -->
         <div class="chrome chrome--toolbar d-flex align-center">
@@ -927,7 +958,8 @@ function send() {
   z-index: 2;
 }
 
-.chrome--brand { top: 16px; left: 16px; }
+/* The row holds the brand chip and the Reset control, 16px apart (ga-4). */
+.chrome--brand-row { top: 16px; left: 16px; }
 
 /*
  * Brand-chip dividers: v-divider's own currentColor border is dropped and the

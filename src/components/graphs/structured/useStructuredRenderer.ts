@@ -21,6 +21,7 @@ import { renderCenterRing } from './components/renderCenterRing'
 import { renderInsightRing } from './components/renderInsightRing'
 import { renderEntityRing } from './components/renderEntityRing'
 import { renderClusterRing } from './components/renderClusterRing'
+import { renderClusterEntityBridge } from './components/renderClusterEntityBridge'
 import { renderRadialConnections } from './components/renderRadialConnections'
 
 export interface StructuredRendererConfig {
@@ -51,7 +52,9 @@ export function useStructuredRenderer() {
     const entityOrbitDistance = STRUCTURED_RINGS.entity
 
     return clusterNodes.map(node => {
-      if (!node.angle) return node // Safety: angle must exist from useD3Hierarchy
+      // Safety: angle must exist from useD3Hierarchy (0 is a VALID angle —
+      // never use a falsy check here, it silently skipped the 3-o'clock node)
+      if (node.angle === undefined) return node
 
       // Recalculate x/y using entity ring radius (300px) instead of cluster ring radius (400px)
       const x = Math.cos(node.angle) * entityOrbitDistance
@@ -63,8 +66,48 @@ export function useStructuredRenderer() {
         y,
         orbitDistance: entityOrbitDistance,
         ring: 2, // Entity ring order (center=0, insight=1, entity=2, cluster=3)
-      }
+        // Connection geometry sizes the endpoint by the ENTITY node radius,
+        // not the cluster's — see useStructuredGeometry.getRadialConnectionEndpoint
+        effectiveKind: 'entity',
+      } as PositionedNode
     })
+  }
+
+  /**
+   * Count the connections that continue INWARD from each cluster's entity
+   * summary into the Structured graph: links in the currently filtered set
+   * touching that cluster id where both endpoints resolve to positioned
+   * nodes (mirroring what renderRadialConnections actually draws). The
+   * render-level Cluster → Entity bridge is not a link, so it is never
+   * counted. The cluster → entity-summary mapping is the existing identity
+   * mapping (same node id repositioned) — no duplicate graph data.
+   */
+  function computeEntityConnectionCounts(
+    positionedNodes: PositionedNode[],
+    links: NetworkLink[],
+  ): Map<string, number> {
+    const nodeMap = new Map<string, PositionedNode>()
+    positionedNodes.forEach(node => nodeMap.set(node.id, node))
+
+    const counts = new Map<string, number>()
+    const endpointId = (endpoint: any): string =>
+      typeof endpoint === 'string' ? endpoint : endpoint?.id
+
+    for (const link of links) {
+      const sourceId = endpointId(link.source)
+      const targetId = endpointId(link.target)
+      const sourceNode = nodeMap.get(sourceId)
+      const targetNode = nodeMap.get(targetId)
+      if (!sourceNode || !targetNode) continue // dropped by the renderer too
+
+      if (sourceNode.kind === 'cluster') {
+        counts.set(sourceId, (counts.get(sourceId) || 0) + 1)
+      }
+      if (targetNode.kind === 'cluster') {
+        counts.set(targetId, (counts.get(targetId) || 0) + 1)
+      }
+    }
+    return counts
   }
 
   /**
@@ -105,16 +148,28 @@ export function useStructuredRenderer() {
     })
 
     // ── RENDERING DISPATCH ────────────────────────────────────────────
+    // Paint order (SVG: later = on top): connections and bridges first so
+    // every line sits BENEATH the nodes, rings next, center avatar last so
+    // nothing is ever visible through or over it.
 
-    // Center ring: single source node as avatar + sentiment gauge
-    const sourceNodes = nodesByKind.get('source') || []
-    if (sourceNodes.length > 0) {
-      renderCenterRing(viewport as any, sourceNodes[0], 0, 0, {
-        userInitials: config.userInitials,
-        sentimentPercent: config.sentimentPercent,
-        sentimentLabel: config.sentimentLabel,
-        chartTheme: config.chartTheme,
-      })
+    // Connections: radial-aware link geometry (not center-offset like Unstructured).
+    // Cluster nodes are swapped for their entity-ring summaries in the node
+    // list, so every bundled curve that used to originate at a cluster now
+    // originates at its entity summary — the cluster itself only carries the
+    // single direct bridge. Hover semantics are unchanged (same node ids).
+    if (links.length > 0) {
+      const connectionNodes = positionedNodes.map(node =>
+        node.kind === 'cluster' ? repositionNodesToEntityRing([node])[0] : node,
+      )
+      renderRadialConnections(viewport as any, connectionNodes, links, {centerX: 0, centerY: 0})
+    }
+
+    // Cluster → Entity bridges: one direct radial line per cluster to its
+    // entity summary, carrying the confidence badge. Render-level only —
+    // no links are added to the dataset.
+    const clusterNodes = nodesByKind.get('cluster') || []
+    if (clusterNodes.length > 0) {
+      renderClusterEntityBridge(viewport as any, clusterNodes, { chartTheme: config.chartTheme })
     }
 
     // Insight ring: uniform-size insights with optional badges
@@ -125,21 +180,30 @@ export function useStructuredRenderer() {
 
     // Entity ring: cluster-summary circles positioned at entity ring radius (300px)
     // Uses the same cluster data as Cluster ring but at a different orbital distance
-    const clusterNodesForEntity = nodesByKind.get('cluster') || []
-    if (clusterNodesForEntity.length > 0) {
-      const entityRingPositionedNodes = repositionNodesToEntityRing(clusterNodesForEntity)
-      renderEntityRing(viewport as any, entityRingPositionedNodes, {chartTheme: config.chartTheme})
+    if (clusterNodes.length > 0) {
+      const entityRingPositionedNodes = repositionNodesToEntityRing(clusterNodes)
+      const connectionCounts = computeEntityConnectionCounts(positionedNodes, links)
+      renderEntityRing(viewport as any, entityRingPositionedNodes, {
+        chartTheme: config.chartTheme,
+        connectionCounts,
+      })
     }
 
     // Cluster ring: uniform-size clusters with source icons + arc labels
-    const clusterNodes = nodesByKind.get('cluster') || []
     if (clusterNodes.length > 0) {
       renderClusterRing(viewport as any, clusterNodes, links, {centerX: 0, centerY: 0, zoom: config.zoom, chartTheme: config.chartTheme})
     }
 
-    // Connections: radial-aware link geometry (not center-offset like Unstructured)
-    if (links.length > 0) {
-      renderRadialConnections(viewport as any, positionedNodes, links, {centerX: 0, centerY: 0})
+    // Center ring LAST: the fully opaque avatar must cover any line that
+    // passes through the middle of the graph.
+    const sourceNodes = nodesByKind.get('source') || []
+    if (sourceNodes.length > 0) {
+      renderCenterRing(viewport as any, sourceNodes[0], 0, 0, {
+        userInitials: config.userInitials,
+        sentimentPercent: config.sentimentPercent,
+        sentimentLabel: config.sentimentLabel,
+        chartTheme: config.chartTheme,
+      })
     }
   }
 

@@ -444,16 +444,17 @@ const rings = [
 
   clusterRing.nodes.forEach((node, idx) => {
     node.timeRange = { start: idx % 3 + 1, end: Math.min(7, idx % 3 + 4) }
-    // Add weight (0-100) for variable cluster sizing (from config)
-    ;(node as any).weight = Math.floor(GRAPH_CLUSTER_CONFIG.weightMin + Math.random() * (GRAPH_CLUSTER_CONFIG.weightMax - GRAPH_CLUSTER_CONFIG.weightMin))
-
-    // TODO: Add deterministic semantic category (mock, pending real AI-derived cluster categorization)
-    // Each cluster gets a category seeded by its ID, ensuring stable/deterministic assignment across reloads
+    // ID-seeded hash → stable/deterministic weight and category across reloads
+    // (Math.random() is banned here — it re-scrambled cluster sizes every load)
     const clusterId = node.id
     let hash = 0
     for (let j = 0; j < clusterId.length; j++) {
       hash = (hash * 31 + clusterId.charCodeAt(j)) % 1000
     }
+    // Add weight (0-100) for variable cluster sizing (from config)
+    ;(node as any).weight = Math.floor(GRAPH_CLUSTER_CONFIG.weightMin + (hash / 1000) * (GRAPH_CLUSTER_CONFIG.weightMax - GRAPH_CLUSTER_CONFIG.weightMin))
+
+    // TODO: Add deterministic semantic category (mock, pending real AI-derived cluster categorization)
     const categoryIndex = Math.floor((hash / 1000) * SEMANTIC_CATEGORIES.length)
     ;(node as any).category = SEMANTIC_CATEGORIES[categoryIndex]
   })

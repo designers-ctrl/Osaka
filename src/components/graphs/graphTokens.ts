@@ -142,16 +142,17 @@ export function getNodeRadius(diameter: number): number {
 // ICON SIZING - Source and Document nodes
 // ============================================================================
 // Icons displayed within source/document nodes.
-// IMPORTANT: Icon size is ABSOLUTE, never calculated from node radius.
-// Source icon = 20px (50% of 40px container diameter)
-// Document icon = 20px (50% of 40px container diameter)
+// Source icon fits closely inside its node circle: icon + 2 × padding = node
+// diameter, keeping a small safe gap so the icon never touches the stroke.
+// Document icon stays ABSOLUTE (20px), never calculated from node radius.
+
+// Safe gap between the source icon and the circle boundary, per side
+export const SOURCE_ICON_PADDING = 2
 
 export const ICON_CONFIG = {
   source: {
-    // ABSOLUTE icon size: 20px (occupies 50% of 40px container)
-    // Must NOT be calculated from node radius
-    // Container: 40px diameter → Icon: 20px
-    iconSize: 20, // px at 1.0 zoom
+    // Derived from the node circle: 30px diameter − 2 × 2px padding = 26px
+    iconSize: NODE_DIAMETERS.source - SOURCE_ICON_PADDING * 2, // px at 1.0 zoom
     opacity: 0.95,
   },
 
@@ -259,6 +260,7 @@ export const TYPOGRAPHY = {
     position: 'right', // Always positioned to the right of node circle
     fontFamily: 'Google Sans Flex',
     fontSize: 14, // ABSOLUTE font size - independent of node size (40px)
+    minFontSize: 11, // On-screen floor: labels shrink with zoom-out but never render below 11px
     fontWeight: 500,
     lineHeight: 20,
     opacity: 0.9,
@@ -300,6 +302,7 @@ export const TYPOGRAPHY = {
     position: 'right', // Positioned to the right of node circle (same as source)
     fontFamily: 'Google Sans Flex',
     fontSize: 14, // ABSOLUTE font size - independent of node size (40px)
+    minFontSize: 11, // On-screen floor: labels shrink with zoom-out but never render below 11px
     fontWeight: 500,
     lineHeight: 20,
     opacity: 0.9,
@@ -480,11 +483,17 @@ export const VIEWPORT = {
 
   // Initial zoom framing
   initialZoom: {
-    marginMultiplier: 0.35, // 65% margin to show all nodes
+    // Structured mode only: legacy container-fit multiplier (unstructured uses fitPadding below)
+    marginMultiplier: 0.28,
+    // Unstructured mode: padding (in data units) added around the rendered graph
+    // bounds when computing the first-load / reset fit-to-view transform
+    fitPadding: 60,
   },
 
   // D3 zoom extent [minZoom, maxZoom]
-  zoomExtent: [0.3, 4] as [number, number],
+  // Min must stay at or below the initial framing scale (marginMultiplier above),
+  // otherwise the first zoom gesture snaps the camera in past the initial view.
+  zoomExtent: [0.25, 4] as [number, number],
 
   // Scroll wheel sensitivity
   wheelDeltaSensitivity: {
@@ -516,6 +525,9 @@ export const SOURCE_NODES = {
     height: 40,
     opacity: 0.95,
   },
+  // Minimum ON-SCREEN diameter for a source node: when zooming out, the circle
+  // (and its icon, proportionally) stops shrinking at 16 × 16 rendered pixels.
+  minDiameter: 16,
 }
 
 // ============================================================================
@@ -708,6 +720,21 @@ export function getFontSize(
 }
 
 /**
+ * Source/document label font size: scales naturally with zoom (bigger when
+ * zoomed in, progressively smaller when zoomed out) but never renders below the
+ * on-screen minimum. Returned value is in data units; rendered px =
+ * value * zoomScale, so clamping at minFontSize / zoomScale pins the floor.
+ */
+export function getScaledLabelFontSize(
+  nodeType: 'source' | 'document',
+  zoomScale: number = 1,
+): number {
+  const { fontSize, minFontSize } = TYPOGRAPHY[nodeType]
+  const k = zoomScale > 0 ? zoomScale : 1
+  return Math.max(fontSize, minFontSize / k)
+}
+
+/**
  * Get ABSOLUTE icon size (never calculated from node radius)
  * Icon size is constant, optionally inverse-scaled by zoom to maintain visual consistency
  * Source icon = 20px (50% of 40px container)
@@ -725,4 +752,64 @@ export function getIconDiameter(
   // Icon size is ABSOLUTE - use iconSize directly, with inverse zoom scaling
   const inverseScale = getInverseZoomScale(zoomScale)
   return iconCfg.iconSize * inverseScale
+}
+
+/**
+ * Source node circle radius (data units): the base radius at normal zoom, but
+ * clamped so the RENDERED diameter never drops below SOURCE_NODES.minDiameter
+ * (16px on screen) when zooming out. Link connection geometry must use this
+ * same clamped radius — see getEffectiveNodeRadius(), the single source of
+ * truth both the circle rendering and getConnectionEndpoints() read from.
+ */
+export function getSourceNodeRadius(zoomScale: number = 1): number {
+  const baseRadius = NODE_DIAMETERS.source / 2
+  const k = zoomScale > 0 ? zoomScale : 1
+  return Math.max(baseRadius, (SOURCE_NODES.minDiameter / 2) / k)
+}
+
+/**
+ * THE single source of truth for a node's effective rendered radius (data
+ * units) at a given zoom level. Both the node-circle rendering AND the link
+ * endpoint geometry (getConnectionEndpoints call sites) must derive radii
+ * from here — if the two ever use different values, links visually run
+ * under/into the circles (the low-zoom endpoint bug this consolidates away).
+ *
+ * Per node type:
+ * - source:  base radius, clamped to a 16px minimum SCREEN diameter → grows
+ *            in data units as zoom decreases (the only zoom-dependent kind)
+ * - cluster: dynamic from weight (preferred) or entityCount
+ * - insight: dynamic from its size metric
+ * - others:  fixed per-type diameter
+ */
+export function getEffectiveNodeRadius(
+  node: { kind?: string, size?: number } & Record<string, any>,
+  zoomScale: number = 1,
+): number {
+  const kind = node.kind || ''
+  if (kind === 'source') {
+    return getSourceNodeRadius(zoomScale)
+  }
+  if (kind === 'cluster') {
+    if (node.weight !== undefined) {
+      return getNodeRadiusForType(kind, node.weight, true)
+    }
+    if (node.entityCount !== undefined) {
+      return getNodeRadiusForType(kind, node.entityCount, false)
+    }
+  }
+  if (kind === 'insight' && node.size) {
+    return getNodeRadiusForType(kind, node.size)
+  }
+  return getNodeRadiusForType(kind)
+}
+
+/**
+ * Source icon diameter (data units), derived from the clamped node radius so
+ * `icon + 2 × padding = node diameter` holds at every zoom level: the icon
+ * scales naturally with the node and shares its 16px-minimum clamp, keeping
+ * the small safe gap to the stroke proportional and clip-free.
+ */
+export function getSourceIconDiameter(zoomScale: number = 1): number {
+  const iconRatio = ICON_CONFIG.source.iconSize / NODE_DIAMETERS.source
+  return getSourceNodeRadius(zoomScale) * 2 * iconRatio
 }

@@ -63,10 +63,18 @@ export const CENTER_AVATAR = {
   radius: STRUCTURED_NODE_SIZES.centerAvatar / 2,
   diameter: STRUCTURED_NODE_SIZES.centerAvatar,
 
-  // Avatar styling (will use theme colors via chartTheme)
-  fill: 'theme', // Will resolve via useChartTheme()
-  stroke: '#9D7EEA',
-  strokeWidth: 2,
+  // Avatar styling — glass-gradient background, OPAQUE: vertical gray2→gray3
+  // gradient, borderless. Fully solid so the graph/lines behind can never
+  // show through the avatar surface. Colors reference the theme's gray
+  // tokens (--v-theme-gray2/gray3) with the same values as hex fallback.
+  stroke: 'none',
+  strokeWidth: 0,
+  background: {
+    gradientStops: [
+      { offset: '12.29%', color: 'rgb(var(--v-theme-gray2, 62, 69, 67))' }, // theme gray2 (#3E4543)
+      { offset: '100%', color: 'rgb(var(--v-theme-gray3, 27, 34, 32))' }, // theme gray3 (#1B2220)
+    ],
+  },
 
   // Initials text styling
   initials: {
@@ -87,13 +95,20 @@ export const CENTER_AVATAR = {
     marginTop: 14, // Distance below avatar
   },
 
-  // Percentage text (e.g., "75%")
+  // Percentage text (e.g., "75%") — the LARGE value in the row below the
+  // avatar, beside the segmented sentiment indicator.
   percentage: {
-    fontSize: 14,
-    fontWeight: 500,
+    fontSize: 20,
+    fontWeight: 600,
     fontFamily: 'Google Sans Flex',
     fill: '#FFFFFF',
-    marginTop: 4, // Distance below gauge
+  },
+
+  // Row below the avatar: [ 75% ] [ segmented indicator ], centered as a
+  // unit under the avatar, both vertically centered on the row's midline.
+  row: {
+    marginTop: 16, // clear vertical gap between avatar bottom and the row
+    gap: 8, // horizontal gap between the percentage and the indicator
   },
 
   // "Sentiment Rate" label
@@ -103,8 +118,30 @@ export const CENTER_AVATAR = {
     fontFamily: 'Google Sans Flex',
     fill: 'rgba(255, 255, 255, 0.7)',
     text: 'Sentiment Rate',
-    marginTop: 2, // Distance below percentage
+    marginTop: 8, // Distance below the value+indicator row
   },
+}
+
+// ============================================================================
+// SENTIMENT INDICATOR (segmented meter under the center avatar)
+// ============================================================================
+// Geometry from Figma node 1646-51131: a 20×14 pill with 2px padding, three
+// equal vertical segments with a 1px gap. Status COLORS are not defined here —
+// renderSentimentIndicator.ts resolves them from the live theme's semantic
+// status tokens (success/warning/error) via chartTheme.status.
+
+export const SENTIMENT_INDICATOR = {
+  width: 20, // px — outer container
+  height: 14, // px — outer container
+  padding: 2, // px — inner inset on all sides
+  gap: 1, // px — between segments
+  borderRadius: 2, // px — outer container corners
+  segments: 3,
+  segmentBorderRadius: 1, // px — each segment's corners
+  /** Outer container: status color at ~10% alpha (Figma's 0.10 treatment). */
+  containerAlpha: 0.10,
+  /** Inactive segment slots — same inactive token as ENTITY_RING.battery. */
+  inactiveColor: 'rgba(255, 255, 255, 0.1)',
 }
 
 // ============================================================================
@@ -140,16 +177,32 @@ export const INSIGHT_RING = {
 export const ENTITY_RING = {
   // Fixed node styling
   nodeRadius: STRUCTURED_NODE_SIZES.entity / 2,
-  fill: 'theme', // Will resolve via chartTheme (categorical[1])
-  stroke: 'none',
-  strokeWidth: 0,
 
-  // Count text inside circle (e.g., "7")
+  // Neutral gray glass (Figma spec): radial gray1 gradient (center 24% →
+  // edge 40%), 0.5px gray1 hairline border, faint white inner highlight.
+  // Reproduced with an SVG radialGradient — CSS backdrop-filter does not
+  // apply to SVG shapes. Colors reference the theme's gray1 token
+  // (--v-theme-gray1, #949B99 = 148,155,153) with hex-rgb fallback.
+  glass: {
+    gradientId: 'entity-node-glass',
+    gradientStops: [
+      { offset: '0%', color: 'rgba(var(--v-theme-gray1, 148, 155, 153), 0.24)' },
+      { offset: '100%', color: 'rgba(var(--v-theme-gray1, 148, 155, 153), 0.40)' },
+    ],
+    stroke: 'rgba(var(--v-theme-gray1, 148, 155, 153), 0.10)',
+    strokeWidth: 0.5,
+    // Approximation of `box-shadow: 0 0 1px rgba(255,255,255,.10) inset`
+    innerHighlight: 'rgba(255, 255, 255, 0.10)',
+    innerHighlightWidth: 0.5,
+  },
+
+  // Count text inside circle (Figma: Inter 8px / 300 / white 80%)
   count: {
-    fontSize: 14,
-    fontWeight: 600,
-    fontFamily: 'Google Sans Flex',
-    fill: '#FFFFFF',
+    fontSize: 8,
+    fontWeight: 300,
+    fontFamily: 'Inter, sans-serif',
+    lineHeight: 12, // px — single SVG text line; recorded for parity with Figma
+    fill: 'rgba(255, 255, 255, 0.80)',
   },
 
   // Percentage text below entity node — REDESIGNED for 38 clusters
@@ -215,6 +268,12 @@ export const CLUSTER_RING = {
 // Links between rings (not the same as Unstructured's center-offset connections)
 
 export const STRUCTURED_CONNECTIONS = {
+  // Edge-bundling pull toward the graph center (0–1). Shared by BOTH the
+  // curve drawing (renderRadialConnections) and the endpoint geometry
+  // (useStructuredGeometry), so the perimeter intersection is computed from
+  // the same departure direction the Bézier actually takes.
+  bundleStrength: 0.6,
+
   // Foreground link (sharp luminous line)
   foreground: {
     strokeWidth: 1,
@@ -238,6 +297,29 @@ export const STRUCTURED_CONNECTIONS = {
 }
 
 // ============================================================================
+// CLUSTER → ENTITY BRIDGE
+// ============================================================================
+// The single direct radial connector from each cluster node to its entity
+// summary node, carrying the confidence badge (percentage + battery, which
+// reuse the ENTITY_RING styling tokens).
+
+export const CLUSTER_ENTITY_BRIDGE = {
+  stroke: 'rgba(255, 255, 255, 0.35)',
+  strokeWidth: 1,
+
+  badge: {
+    // Quiet backing panel behind the % + battery so they read over the line
+    width: 40,
+    height: 28,
+    borderRadius: 4,
+    fill: 'rgba(12, 19, 17, 0.85)', // theme gray4 tone, near-opaque
+    // Vertical offsets from the badge center (in the rotated spoke frame)
+    textOffsetY: 6, // percentage baseline sits slightly above center
+    batteryOffsetY: 3, // battery top edge sits slightly below center
+  },
+}
+
+// ============================================================================
 // VIEWPORT & POSITIONING
 // ============================================================================
 // Coordinate system and layout bounds
@@ -250,6 +332,15 @@ export const STRUCTURED_VIEWPORT = {
   // Center of the coordinate system (same as Unstructured)
   centerX: 800 / 2, // 400
   centerY: 600 / 2, // 300
+
+  // Furthest visual extent from the graph origin: the cluster ring's radial
+  // category labels start at 420 (labelRadius in renderClusterRing) and
+  // extend up to ~70px of text outward. The Structured initial camera
+  // (NetworkGraphD3.computeInitialTransform, structured branch) centers and
+  // fits THIS radius — never the Unstructured camera or container-px math.
+  outerRadius: 490,
+  // Breathing room (data units) kept around the outer radius when fitting.
+  fitPadding: 10,
 }
 
 // ============================================================================

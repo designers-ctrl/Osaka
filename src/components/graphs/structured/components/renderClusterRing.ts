@@ -108,6 +108,8 @@ export function renderClusterRing(
         .attr('height', iconSize)
         .attr('href', iconHref)
         .attr('opacity', SOURCE_NODES.icon.opacity)
+        // Decorative overlay: must never swallow the circle's hover events
+        .style('pointer-events', 'none')
     }
   })
 
