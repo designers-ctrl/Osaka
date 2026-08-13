@@ -1,0 +1,120 @@
+<!--
+  src/components/AssistantRailToggle.vue
+
+  The floating collapse/expand handle that straddles the seam between the graph
+  canvas and the assistant rail. A deliberate non-Vuetify control (Figma spec):
+  one glass container holding two semantic <button>s — chevron-left OPENS the
+  rail to its full width, chevron-right hides it — split by a 1px
+  gradient-gray divider.
+
+  The component owns NO rail state: the screen keeps its single `railOpen` ref
+  and passes it in as `open`; the buttons only emit `collapse` / `expand`.
+  Both sides stay visible and enabled in every state — emitting the action
+  the rail is already in is simply a no-op at the screen level, so nothing
+  needs disabling and the control never shifts.
+
+  Every color derives from theme tokens — the spec's #000101 border is the
+  `background` token, the body gradient is gray3 → gray4, and both inset
+  glints plus the hover/pressed fills are gray1 at the spec's alphas. The
+  glass body stays fully opaque in every state — only the per-button fills
+  react to hover/pressed.
+-->
+<script setup lang="ts">
+defineProps<{
+  /** Whether the assistant rail is currently open (the screen's `railOpen`). */
+  open: boolean
+}>()
+
+const emit = defineEmits<{
+  /** Left chevron — hide the rail. */
+  collapse: []
+  /** Right chevron — show the rail. */
+  expand: []
+}>()
+</script>
+
+<template>
+  <div class="rail-toggle" role="group" aria-label="Assistant rail">
+    <button
+      type="button"
+      class="rail-toggle__btn"
+      aria-label="Show the assistant"
+      @click="emit('expand')"
+    >
+      <v-icon icon="chevronLeft" size="x-small" />
+    </button>
+
+    <span class="rail-toggle__divider" aria-hidden="true" />
+
+    <button
+      type="button"
+      class="rail-toggle__btn"
+      aria-label="Hide the assistant"
+      @click="emit('collapse')"
+    >
+      <v-icon icon="chevronRight" size="x-small" />
+    </button>
+  </div>
+</template>
+
+<style scoped>
+/*
+ * Glass container (Figma spec). Gradient + shadows are token-derived:
+ * border = the page-background black, body = gray3 → gray4, the two inset
+ * glints = gray1 at 20% / 40%, drop shadow = page black at 60%.
+ */
+.rail-toggle {
+  display: inline-flex;
+  align-items: stretch;
+  overflow: hidden; /* clips the buttons' square hover fills to the radius */
+  border-radius: var(--radius-xs);
+  border: 1px solid rgb(var(--v-theme-background));
+  background: linear-gradient(
+    180deg,
+    rgb(var(--v-theme-gray3)) 0%,
+    rgb(var(--v-theme-gray4)) 100%
+  );
+  box-shadow:
+    0 -5px 4px rgba(var(--v-theme-gray1), 0.2) inset,
+    0 4px 4px rgba(var(--v-theme-gray1), 0.4) inset,
+    0 12px 24px rgba(var(--v-theme-background), 0.6);
+  backdrop-filter: blur(2px);
+}
+
+/* Each half: a semantic <button> that reads as a plain div section. */
+.rail-toggle__btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  min-width: 16px;
+  min-height: 16px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: rgb(var(--v-theme-on-surface));
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+.rail-toggle__btn:hover {
+  background: rgba(var(--v-theme-gray1), 0.2);
+}
+
+.rail-toggle__btn:active {
+  background: rgba(var(--v-theme-gray1), 0.4);
+}
+
+.rail-toggle__btn:focus-visible {
+  outline: 2px solid rgb(var(--v-theme-primary));
+  outline-offset: -2px;
+}
+
+/* 1px vertical splitter between the halves — gray1 at low opacity. */
+.rail-toggle__divider {
+  width: 1px;
+  align-self: stretch;
+  background: rgba(var(--v-theme-gray1), 0.2);
+}
+</style>

@@ -1,0 +1,163 @@
+/**
+ * src/styles/settings.scss
+ *
+ * ⚙️  GENERAL BUILD-TIME SCALES — radius, spacing, sizing, type.
+ *
+ * Colors live in the control panel (src/plugins/vuetify.ts). These scales must
+ * be here because they're Sass, compiled before the browser runs. Changing
+ * anything here needs a DEV-SERVER RESTART (colors hot-reload; these don't).
+ *
+ * Values shown are Vuetify 4.1.2 defaults. Full per-component knob list:
+ * src/styles/sass-variables-reference.md
+ *
+ * ⚠️ The RADIUS numbers live in ./_tokens.scss, not here — a Sass `with(…)`
+ * block can't reference the variables it configures, so the scale and
+ * $border-radius-root could only be coupled via a separate module. Read that
+ * file's header before retuning radius; edit the five values there, not the
+ * references below.
+ */
+
+@use './tokens' as t;
+
+@use 'vuetify/settings' with ( // ── SPACING ──────────────────────────────────────────────
+  // Base unit behind every ma-*/pa-* utility and most component padding.
+  $spacer: 4px, // default 4px  →  pa-1 = 4px, pa-4 = 16px
+  // $spacers-steps: 16,        // default 16   →  how many pa-N / ma-N steps exist
+  // $grid-gutter: 24px,        // default $spacer * 6  →  gap between <v-col>
+
+  // ── RADIUS ───────────────────────────────────────────────
+  // ⚠️ EDIT THE VALUES IN ./_tokens.scss, NOT HERE. Every reference below is
+  // deliberate — the indirection is what keeps Vuetify's two radius channels in
+  // step, so don't "simplify" one back to a px literal.
+  // Vuetify's stock scale, for comparison: sm 2 · md (and null) 4 · lg 8 · xl 24;
+  // stock has NO `2xl` — that key is this template's addition.
+  //
+  // CHANNEL 2: the fallback for the ~29 per-component radius vars — dialog,
+  // menu, snackbar, tooltip, expansion panel, label chip, pagination, picker,
+  // skeleton, tab-inset — i.e. every surface with no `rounded` prop to pass.
+  // Bound to $radius-md so those land on the content-card tier instead of
+  // stranding at Vuetify's stock 4px while the rest of the app is 8–24px.
+  $border-radius-root: t.$radius-md, // default 4px
+  // CHANNEL 1: the named scale behind the `rounded` prop and `rounded-*` utils.
+  // Vuetify keys the BARE `.rounded` class off the `null` entry, not off `md` —
+  // both bind to $radius-md here so the two classes can't render differently.
+  $rounded: (
+    0: t.$radius-0,
+    'xs': t.$radius-xs,
+    'sm': t.$radius-sm,
+    null: t.$radius-md,  // the bare `rounded` class — same var as `md`, by design
+    'md': t.$radius-md,  // the VCard content-card tier
+    'lg': t.$radius-lg,  // the input tier — see the field-label note in overrides.css
+    'xl': t.$radius-xl,
+    '2xl': t.$radius-2xl, // also reaches --section-radius (overrides.css) via css-tokens.scss
+    '3xl': t.$radius-3xl,
+    'full': t.$radius-full,
+    'pill': t.$radius-full,
+    'circle': 50%,
+    'shaped': t.$radius-2xl 0,
+  ),
+
+  // ── CARD PADDING ─────────────────────────────────────────
+  // Header padding for every card (v-card-item). Its BOTTOM value also IS the
+  // gap between the header and the body — Vuetify auto-zeroes v-card-text's top
+  // padding when it follows a v-card-item. So 16px here = uniform 16px card
+  // padding AND a 16px header↔content gap, app-wide. (v-card-text padding is
+  // already 1rem. DIALOG card headers are a separate var, $dialog-card-header-
+  // padding, left at its 16px/24px default.)
+  $card-item-padding: 1rem, // default .625rem 1rem (10px / 16px)
+
+  // ── SELECT / COMBOBOX / AUTOCOMPLETE POPUP ───────────────
+  // ⚠️ THREE PAIRS, NOT ONE. Vuetify gives VSelect, VAutocomplete and VCombobox
+  // each their OWN radius + elevation var (all stock 4px / 2) — they do NOT read
+  // a shared one and they do NOT fall back to $border-radius-root. Setting only
+  // the select pair leaves the other two popups boxy and flatter, right next to
+  // it in the same form. Retune all three together or they visibly drift.
+  //
+  // The dropdown a v-select opens is NOT the hand-composed v-menu the account /
+  // cart / notification menus use — the field generates its own popup, styled
+  // only by these Sass vars. Vuetify's stock defaults (4px radius, elevation
+  // 2) read boxy and flat next to those bespoke menus (rounded="lg", elevation
+  // "6"). Bring them up to the same treatment so every auto-generated dropdown
+  // matches. Radius = the `lg` step (12px) — the same step the fields themselves
+  // sit on. Scope: the `.v-{select,autocomplete,combobox}__content` popups only —
+  // v-menu/v-card menus and in-page lists are untouched.
+  //
+  // Elevation MUST stay 1–5: Vuetify 4's shadow map only defines 0–5, so 6+ emit
+  // a surface tint but NO box-shadow (that's why the popup had no shadow at 6).
+  // 3 matches $menu-elevation — the shadow every other menu uses — so these
+  // popups cast the same shadow as the account/cart/notification menus. It lands
+  // on the OUTER .v-*__content (unclipped); the inner sheet's own shadow is
+  // eaten by that element's overflow:hidden, which is why the field must set it.
+  $select-content-border-radius: t.$radius-lg,       // default 4px  →  matches rounded="lg"
+  $select-content-elevation: 3,                      // default 2    →  matches $menu-elevation (real shadow; 6 = none)
+  $autocomplete-content-border-radius: t.$radius-lg, // keep in step with the select pair above
+  $autocomplete-content-elevation: 3,
+  $combobox-content-border-radius: t.$radius-lg,     // keep in step with the select pair above
+  $combobox-content-elevation: 3,
+
+  // ── SHADOWS / ELEVATION ──────────────────────────────────
+  // Vuetify's stock elevation is "hard": the key shadow is near-opaque (0.3) with
+  // a tiny 1–4px blur, and the ambient carries positive spread — together they read
+  // as a crisp dark edge rather than a soft drop. We reshape BOTH ramps app-wide so
+  // every elevated surface (menus, dialogs, select popups, any raised card) casts a
+  // soft, diffuse shadow: bigger blur, ZERO spread, and ~1/3 the opacity. Colour still
+  // themes through --v-shadow-color. Levels 0–5 only (Vuetify has no 6+). Each map
+  // entry is a single shadow; the elevation() mixin stacks key + ambient per level.
+  // e.g. elevation 3 (menus): 0 3px 9px /.12  +  0 6px 18px /.06  (was 0 1px 3px /.3
+  // + 0 4px 8px 3px /.15). Tune blur for softness, the .1x opacities for weight.
+  $shadow-key: (
+    0: (0px 0px 0px 0px transparent),
+    1: (0px 1px 3px 0px rgba(var(--v-shadow-color), 0.10)),
+    2: (0px 2px 6px 0px rgba(var(--v-shadow-color), 0.11)),
+    3: (0px 3px 9px 0px rgba(var(--v-shadow-color), 0.12)),
+    4: (0px 5px 14px 0px rgba(var(--v-shadow-color), 0.12)),
+    5: (0px 8px 20px 0px rgba(var(--v-shadow-color), 0.13)),
+  ),
+  $shadow-ambient: (
+    0: (0px 0px 0px 0px transparent),
+    1: (0px 2px 6px 0px rgba(var(--v-shadow-color), 0.05)),
+    2: (0px 3px 10px 0px rgba(var(--v-shadow-color), 0.05)),
+    3: (0px 6px 18px 0px rgba(var(--v-shadow-color), 0.06)),
+    4: (0px 9px 26px 0px rgba(var(--v-shadow-color), 0.06)),
+    5: (0px 14px 38px 0px rgba(var(--v-shadow-color), 0.07)),
+  ),
+
+  // ── LIST ITEMS ───────────────────────────────────────────
+  // Default title size for every REGULAR (non-nav) list item — this is app-wide:
+  // dropdown/menu popups AND all in-page content lists (My Intakes, Account
+  // Settings, Treatment Detail, Clinic Dashboard, etc.). Was body-large (16px).
+  // `nav` lists (the sidebar, Messaging conversation list, clinician sidebar) use a
+  // SEPARATE var ($list-item-nav-title-font-size, 13px) and are deliberately NOT
+  // changed here. Subtitles have their own var (already 14px), so two-line rows keep
+  // their subtitle size — only the title line moves.
+  $list-item-title-font-size: 0.875rem, // body-medium (14px) — was body-large (16px)
+
+  // ── SIZING / TYPE ────────────────────────────────────────
+  // $size-scale: 8px,          // default $spacer * 2  →  base for size utilities
+  // $font-size-root: 16px,     // default 1rem  →  root rem basis for all type
+  // $line-height-root: 1.5,    // default 1.5
+  // ⚠️ 'Google Sans Flex Variable' is the exact @font-face family name Fontsource
+  //    declares for the variable package (@fontsource-variable/google-sans-flex,
+  //    registered in vite.config.mts). The "Variable" suffix is part of the name —
+  //    drop it and the app silently renders in system sans-serif.
+  $body-font-family: ('Google Sans Flex Variable', sans-serif),
+
+  // ── FIELDS ───────────────────────────────────────────────
+  // Idle border/underline opacity for every outlined/filled/underlined form field
+  // (text-field, textarea, select, autocomplete, combobox, file-input). Focus (1)
+  // and hover (high-emphasis) are pinned separately, so this only softens the
+  // resting state. Doesn't touch labels/text or non-field borders.
+  $field-outline-opacity: 0.16, // default 0.38
+
+  // Focused border stays a hairline instead of doubling to 2px. Stock Vuetify
+  // signals focus with THICKNESS (1px → 2px), which reads heavy against the soft
+  // 0.16 resting border above and makes the field visibly grow on focus. At 1px
+  // the geometry holds still and the whole focus signal is the opacity jump —
+  // 0.16 → 1 on the same hairline. That contrast step is large enough to read on
+  // its own; fields carry no `color` default, so focus stays in the text colour.
+  // ⚠️ This makes the resting opacity above load-bearing: raise $field-outline-opacity
+  // much past 0.16 and the two states start converging, since nothing else moves.
+  // Also covers the filled/underlined focused underline (same var). Does NOT touch
+  // the error state, which signals via colour + opacity, not width.
+  $field-focused-border-width: 1px, // default 2px
+);

@@ -1,0 +1,143 @@
+/**
+ * src/styles/surfaces.scss
+ *
+ * Glass-morphism surface treatments for cards and chrome.
+ *
+ * Two reusable variants:
+ * - .surface--brand: Top-level chrome (logo, user avatar, notifications)
+ * - .surface--card: Side-section cards (memory growth, insights, etc.)
+ *
+ * Each combines:
+ * - Linear gradient background
+ * - Gradient border (1px inside stroke)
+ * - Drop shadow + inner shadows
+ * - Background blur for glass effect
+ *
+ * Colors are theme tokens from vuetify.ts (Gray/3, Gray/4, etc.), converted to
+ * their hex equivalents for gradients. Inner shadows use White at 20%/40% opacity.
+ * All values from Figma design spec.
+ */
+
+// ── COLOR TOKENS (mapped to vuetify.ts theme) ────────────────────────────────
+// Dark theme values; light theme would need separate vars if adding light support.
+$color-gray-3: #1b2220;   // Gray/3 from vuetify.ts
+$color-gray-4: #0c1311;   // Gray/4 from vuetify.ts
+$color-black-1: #000101;  // Black/1 from vuetify.ts
+$color-white-w: #ffffff;  // Gray/W (white)
+
+// ── MIXIN: Brand Chrome Surface ─────────────────────────────────────────────
+// Top-level chrome container: logo, brand name, user avatar, notifications.
+// Heavier treatment with more prominent shadow for visual hierarchy.
+@mixin surface-brand {
+  position: relative;
+
+  // Layer 1: Background gradient (Gray/3 → Gray/4, top → bottom)
+  background: linear-gradient(180deg, $color-gray-3 0%, $color-gray-4 100%);
+
+  // Layer 2: Gradient border (1px, inside stroke)
+  border: 1px solid;
+  border-image: linear-gradient(180deg, $color-black-1 0%, $color-gray-4 100%) 1;
+  border-radius: var(--radius-lg, 12px); // 8px corner radius
+
+  // Layer 3: Drop shadow (X: 0, Y: 12, Blur: 24, Spread: 0)
+  box-shadow:
+    0 12px 24px rgba(0, 1, 1, 0.6),
+    // Inner shadow 1 (X: 0, Y: -5, Blur: 4, Spread: 0, White at 20%)
+    inset 0 -5px 4px rgba($color-white-w, 0.2),
+    // Inner shadow 2 (X: 0, Y: 4, Blur: 4, Spread: 0, White at 40%)
+    inset 0 4px 4px rgba($color-white-w, 0.4);
+
+  // Layer 4: Background blur (4px uniform)
+  backdrop-filter: blur(4px);
+}
+
+// ── MIXIN: Card Surface ────────────────────────────────────────────────────
+// Side-section cards: memory growth, insights, entity context.
+// Lighter treatment with softer shadows for visual recession.
+@mixin surface-card {
+  position: relative;
+
+  // Layer 1: Background gradient (Gray/3 → Black/1, top → bottom)
+  background: linear-gradient(180deg, $color-gray-3 0%, $color-black-1 100%);
+
+  // Layer 2 (border): intentionally none — cards are borderless; the gradient,
+  // inner shadows and blur carry the surface on their own. (Removing the old
+  // border-image also lets border-radius round the surface properly again:
+  // border-image always drew square corners over the rounding.)
+  border-radius: var(--radius-lg, 12px);
+
+  // Layer 3: Inner shadows only (no drop shadow for card recession)
+  box-shadow:
+    // Inner shadow 1 (X: 0, Y: -5, Blur: 4, Spread: 0, White at 20%)
+    inset 0 -5px 4px rgba($color-white-w, 0.2),
+    // Inner shadow 2 (X: 0, Y: 4, Blur: 4, Spread: 0, White at 40%)
+    inset 0 4px 4px rgba($color-white-w, 0.4);
+
+  // Layer 4: Background blur (8px uniform, stronger than brand)
+  backdrop-filter: blur(8px);
+}
+
+// ── UTILITY CLASSES ────────────────────────────────────────────────────────
+
+// Brand chrome — top bar, logo area, notifications
+.surface--brand {
+  @include surface-brand;
+}
+
+// Card surfaces — side panels, memory cards, insights
+.surface--card {
+  @include surface-card;
+}
+
+// ── VARIANT: Dark mode adjustments (if needed in future) ──────────────────────
+// Currently the mixins assume dark theme. Light theme would need separate
+// color definitions and media query overrides. Add them here when needed.
+
+// ── MIXIN: Legend Surface ──────────────────────────────────────────────────
+// Canvas legend card: the mark vocabulary and node type key.
+// Subtle treatment with gradient matching card recession pattern.
+@mixin surface-legend {
+  position: relative;
+
+  // Layer 1: Background gradient (Gray/3 → Black/1, top → bottom)
+  background: linear-gradient(180deg, $color-gray-3 0%, $color-black-1 100%);
+
+  // Layer 2: Gradient border (1px, inside stroke). NOT border-image — that
+  // always paints square, ignoring border-radius. The transparent border
+  // keeps the box metrics, and the ::before below draws the same gradient as
+  // a masked ring that follows the card's radius (the AppButton technique).
+  border: 1px solid transparent;
+  border-radius: var(--radius-lg, 12px);
+
+  &::before {
+    content: '';
+    position: absolute;
+    inset: -1px; // sit exactly on the border area
+    padding: 1px;
+    border-radius: inherit;
+    background: linear-gradient(180deg, $color-black-1 0%, $color-gray-4 100%);
+    pointer-events: none;
+    -webkit-mask:
+      linear-gradient(#fff 0 0) content-box,
+      linear-gradient(#fff 0 0);
+    -webkit-mask-composite: xor;
+    mask:
+      linear-gradient(#fff 0 0) content-box,
+      linear-gradient(#fff 0 0);
+    mask-composite: exclude;
+  }
+
+  // Layer 3: No drop or inner shadows — legend is content-focused, not embellished
+  // The gradient and border provide visual grounding without extra depth.
+  box-shadow: none;
+
+  // Layer 4: Background blur (8px uniform)
+  backdrop-filter: blur(8px);
+}
+
+// ── UTILITY CLASS ──────────────────────────────────────────────────────────
+
+// Legend surface — canvas legend/key
+.surface--legend {
+  @include surface-legend;
+}

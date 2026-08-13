@@ -1,0 +1,47 @@
+/**
+ * src/styles/_button-tokens.scss
+ *
+ * Button sizing and styling tokens (Figma Button Component Set).
+ * These are used by AppButton.vue for the four button sizes.
+ *
+ * Four button sizes: xs (24px), s (32px), m (40px), l (48px)
+ * Font size is inherited, not set by button scale.
+ * Icon size is fixed (never scales with button size).
+ * Gap between icon and label is fixed per size.
+ */
+
+@use './tokens' as t;
+
+// ── BUTTON SIZING SCALE ────────────────────────────────────────
+
+// XS: 24px height
+$button-size-xs-height: 24px;
+$button-size-xs-padding-y: 6px;
+$button-size-xs-padding-x-label: 8px;
+$button-size-xs-padding-x-icon-only: 6px;
+$button-size-xs-radius: t.$radius-xs;
+$button-size-xs-gap: 10px;
+
+// S: 32px height
+$button-size-s-height: 32px;
+$button-size-s-padding-y: 8px;
+$button-size-s-padding-x-label: 12px;
+$button-size-s-padding-x-icon-only: 8px;
+$button-size-s-radius: t.$radius-sm;
+$button-size-s-gap: 10px;
+
+// M: 40px height (default)
+$button-size-m-height: 40px;
+$button-size-m-padding-y: 10px;
+$button-size-m-padding-x-label: 12px;
+$button-size-m-padding-x-icon-only: 10px;
+$button-size-m-radius: t.$radius-md;
+$button-size-m-gap: 10px;
+
+// L: 48px height
+$button-size-l-height: 48px;
+$button-size-l-padding-y: 12px;
+$button-size-l-padding-x-label: 16px;
+$button-size-l-padding-x-icon-only: 14px;
+$button-size-l-radius: t.$radius-md;
+$button-size-l-gap: 12px;

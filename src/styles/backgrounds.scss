@@ -1,0 +1,143 @@
+/**
+ * Background Layer System
+ *
+ * Three-layer approach for rich background visuals:
+ * Layer 1: Base solid color (from --v-theme-background)
+ * Layer 2: Gradient overlay (radial, dark mode only)
+ * Layer 3: Noise texture (SVG pattern with multiply blend)
+ */
+
+// Dark mode gradient — applies over base background
+// Provides depth with radial gradient from gray-3 to black
+// Position: center-right, slightly below center
+$dark-gradient: radial-gradient(
+  46.61% 109.78% at 51.61% 55.8%,
+  var(--Gray-3, #1b2220) 0%,
+  #000 100%
+);
+
+// Noise texture — SVG pattern overlay
+// Multiply blend mode at 16% opacity for subtle texture
+// Can be applied inline or as a background utility
+$noise-filter: url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1920" height="982" viewBox="0 0 1920 982" fill="none"><path d="M0 0H1920V982H0V0Z" fill="url(%23pattern0)" fill-opacity="0.16" style="mix-blend-mode:multiply"/><defs><pattern id="pattern0" patternUnits="userSpaceOnUse" patternTransform="matrix(235.2 0 0 352.8 842.4 402.8)" preserveAspectRatio="none" viewBox="0 0 336 504" width="1" height="1"><use xlink:href="%23inner" transform="translate(-336 0)"/><g id="inner"><rect width="336" height="252" fill="url(%23texture)"/></g><use xlink:href="%23inner" transform="translate(-168 252)"/><use xlink:href="%23inner" transform="translate(168 252)"/></pattern><pattern id="texture" patternContentUnits="objectBoundingBox" width="1" height="1"><image width="336" height="252" preserveAspectRatio="none" xlink:href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAVAAAAD8CAYAAAAhQfz4AAAQAE..."/></pattern></defs></svg>');
+
+// Page background — full three-layer setup
+// Use this on your root layout or page wrapper
+.background-full-page {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  z-index: -1;
+  overflow: hidden;
+
+  // Layer 1: Base
+  background-color: rgb(var(--v-theme-background));
+
+  // Layer 2: Gradient (dark mode only)
+  @media (prefers-color-scheme: dark) {
+    background-image: $dark-gradient;
+  }
+
+  // Layer 3: Noise texture
+  &::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    pointer-events: none;
+    mix-blend-mode: multiply;
+    opacity: 0.16;
+    background-image: repeating-linear-gradient(
+      0deg,
+      rgba(0, 0, 0, 0.01) 0px,
+      transparent 1px,
+      transparent 2px,
+      rgba(0, 0, 0, 0.03) 3px
+    );
+  }
+}
+
+// Layered background for components
+// Use when you want the three-layer effect on a specific element
+.background-layered {
+  position: relative;
+
+  &::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: -1;
+
+    // Base color
+    background-color: rgb(var(--v-theme-background));
+
+    // Gradient overlay (dark mode)
+    @media (prefers-color-scheme: dark) {
+      background-image: $dark-gradient;
+    }
+  }
+
+  &::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: -1;
+    pointer-events: none;
+    mix-blend-mode: multiply;
+    opacity: 0.16;
+    background-image: repeating-linear-gradient(
+      0deg,
+      rgba(0, 0, 0, 0.01) 0px,
+      transparent 1px,
+      transparent 2px,
+      rgba(0, 0, 0, 0.03) 3px
+    );
+  }
+}
+
+// Dark gradient only (no noise)
+.background-gradient-dark {
+  @media (prefers-color-scheme: dark) {
+    background-image: $dark-gradient;
+  }
+}
+
+// Noise texture only
+.background-noise {
+  position: relative;
+
+  &::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    pointer-events: none;
+    mix-blend-mode: multiply;
+    opacity: 0.16;
+    background-image: repeating-linear-gradient(
+      0deg,
+      rgba(0, 0, 0, 0.01) 0px,
+      transparent 1px,
+      transparent 2px,
+      rgba(0, 0, 0, 0.03) 3px
+    );
+  }
+}
+
+// CSS custom properties for use in <style> blocks
+:root {
+  --background-dark-gradient: #{$dark-gradient};
+  --background-base: rgb(var(--v-theme-background));
+}
