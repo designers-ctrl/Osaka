@@ -6,6 +6,8 @@ This directory contains documentation about how Osaka is structured and how its 
 
 - **[GRAPH_ARCHITECTURE.md](GRAPH_ARCHITECTURE.md)** — The complete specification of the graph visualization layer. Describes the multi-layer architecture (Graph Engine → Layout Engine → Renderer), all supported interactions, animation patterns, and state transitions. **Start here** if you're working on graph features.
 
+- **[CLUSTER_DRILLDOWN.md](CLUSTER_DRILLDOWN.md)** — The implemented Cluster drill-down inside the Unstructured graph: what `expandedClusterId` switches on, how the expanded entities / related clusters / emphasis sets are derived from existing data, the region + packing geometry, the routed connections, and the rules the feature must not break. Read this before touching `src/components/graphs/expanded/`.
+
 - **[GRAPH_ARCHITECTURE_SUMMARY.md](GRAPH_ARCHITECTURE_SUMMARY.md)** — Executive overview and business rationale for the layered architecture. Explains the problems it solves, what's already implemented, and next steps.
 
 - **[GRAPH_MIGRATION_GUIDE.md](GRAPH_MIGRATION_GUIDE.md)** — Step-by-step guide for refactoring the graph from its current D3-centric design to the proposed layered architecture. Covers 3 phases over 3-4 weeks with code examples and troubleshooting.

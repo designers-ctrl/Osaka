@@ -7,11 +7,20 @@
   rail to its full width, chevron-right hides it — split by a 1px
   gradient-gray divider.
 
-  The component owns NO rail state: the screen keeps its single `railOpen` ref
-  and passes it in as `open`; the buttons only emit `collapse` / `expand`.
-  Both sides stay visible and enabled in every state — emitting the action
-  the rail is already in is simply a no-op at the screen level, so nothing
-  needs disabling and the control never shifts.
+  The component owns NO rail state: the screen keeps the single `railState` ref
+  and passes it in; the buttons only emit `collapse` / `expand`. What each emit
+  MEANS is the screen's business — chevron left is one step toward more
+  assistant (closed → open → fullscreen), chevron right closes outright.
+
+  The control shows only the actions that EXIST in the current state, rather
+  than showing both and disabling one — it shrinks to what is available:
+
+    closed      → chevron left only   (nothing left to close)
+    default     → both
+    fullscreen  → chevron right only  (nothing further to expand to)
+
+  The divider is part of that: it only earns its place when there are two
+  halves to divide.
 
   Every color derives from theme tokens — the spec's #000101 border is the
   `background` token, the body gradient is gray3 → gray4, and both inset
@@ -20,15 +29,24 @@
   react to hover/pressed.
 -->
 <script setup lang="ts">
-defineProps<{
-  /** Whether the assistant rail is currently open (the screen's `railOpen`). */
-  open: boolean
+import { computed } from 'vue'
+
+const props = defineProps<{
+  /** The rail's current state (the screen's `railState`). */
+  state: 'closed' | 'open' | 'fullscreen'
 }>()
 
+/** A closed rail cannot be closed further — that half is not rendered. */
+const canCollapse = computed(() => props.state !== 'closed')
+/** A fullscreen rail cannot expand further — that half is not rendered. */
+const canExpand = computed(() => props.state !== 'fullscreen')
+const expandLabel = computed(() =>
+  (props.state === 'closed' ? 'Show the assistant' : 'Expand the assistant to full width'))
+
 const emit = defineEmits<{
-  /** Left chevron — hide the rail. */
+  /** Right chevron — close the rail. */
   collapse: []
-  /** Right chevron — show the rail. */
+  /** Left chevron — one step toward more assistant. */
   expand: []
 }>()
 </script>
@@ -36,17 +54,20 @@ const emit = defineEmits<{
 <template>
   <div class="rail-toggle" role="group" aria-label="Assistant rail">
     <button
+      v-if="canExpand"
       type="button"
       class="rail-toggle__btn"
-      aria-label="Show the assistant"
+      :aria-label="expandLabel"
       @click="emit('expand')"
     >
       <v-icon icon="chevronLeft" size="x-small" />
     </button>
 
-    <span class="rail-toggle__divider" aria-hidden="true" />
+    <!-- Only when there are two halves to divide. -->
+    <span v-if="canExpand && canCollapse" class="rail-toggle__divider" aria-hidden="true" />
 
     <button
+      v-if="canCollapse"
       type="button"
       class="rail-toggle__btn"
       aria-label="Hide the assistant"

@@ -30,6 +30,7 @@ surface. Product components are built per project.
 |---|---|
 | `AppIcon.vue` | **Vuetify's global icon renderer** — wired in `src/plugins/vuetify.ts` as `component: props => h(AppIcon, …)`. Every `<v-icon>` and every component-internal icon goes through it. **Don't delete it**; it looks like a product component but the whole icon layer depends on it. |
 | `AppPictogram.vue` | Renders an IBM Carbon pictogram by semantic key. Used by the Storybook. |
+| `AppSeam.vue` | The house divider — `v-divider` with a fade that reaches zero at both ends, a movable fade peak (`stop`), and an optional solid band (`filled`) for card seams. Use it instead of re-writing a gradient rule. |
 | `charts/` | The ECharts chart kit — 8 dataset-driven presets on a shared `BaseChart` bridge. See the repo `CLAUDE.md` data-viz mandate before adding one. |
 
 Icon and pictogram keys live in `src/icons/carbon.ts` and `src/icons/pictograms.ts` — add the key

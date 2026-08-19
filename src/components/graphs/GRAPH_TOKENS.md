@@ -125,6 +125,41 @@ ANIMATIONS.labelFade: 150         // ms for label transitions
 
 **Used by:** useD3Interaction.ts (when implemented)
 
+### BACKGROUND_PATTERN
+The dot grid behind the graph, measured in **screen** pixels.
+
+```typescript
+BACKGROUND_PATTERN.spacing: 16     // px between dot centers, both axes
+BACKGROUND_PATTERN.dotRadius: 1.2  // px radius of one dot
+BACKGROUND_PATTERN.feather: 0.5    // px the dot edge fades over (anti-aliasing)
+BACKGROUND_PATTERN.opacity: 1      // ink is the `background` theme token, composed in CSS
+```
+
+**Used by:** NetworkGraphD3.vue — bound into its scoped stylesheet with `v-bind()`
+and painted on the container element, *not* inside the `<svg>`.
+
+⚠️ The rule painting this grid **must declare `background-repeat: repeat`**.
+Vuetify's reset sets `background-repeat: no-repeat` on `*, ::before, ::after`, so
+any tiled background that stays silent about it paints one tile in the top-left
+corner and reads as nothing at all.
+
+The ink is the `background` theme token at full alpha, so each dot punches the
+host canvas back to page black. The canvas under it is a radial gradient from
+`#1B2220` at its center to `#000` at the edges — so the grid is strongest across
+the lit center and fades to nothing toward the corners, where dot and ground are
+the same color. Contrast is therefore a property of that gradient, not of these
+tokens: to spread the texture wider, widen the canvas gradient.
+
+The sizes are ~1.6× the numbers the SVG `<pattern>` used, because that pattern was
+authored in data space and the viewBox scaled it up before it reached the
+screen. Moving to CSS removed the multiplier, so the data-space values had to be
+restated as the screen sizes they were actually producing.
+
+⚠️ This grid must stay in CSS. Everything drawn inside the `<svg>` lives in the
+800×600 data space (`VIEWPORT.dataWidth/dataHeight`) and is scaled by the
+viewBox to fit the container, so the same grid as an SVG `<pattern>` grew with
+the window and looked coarse on large displays.
+
 ### CONSTANT_SCREEN_SIZE (Experimental)
 Support for keeping visual size constant while zooming.
 

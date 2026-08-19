@@ -87,6 +87,12 @@ hardcode a chart hex/px; never add a second charting library; **status colors ar
 state, never a series color**. The `categorical` order is load-bearing (validated colorblind-safe);
 if you change it, re-validate with the `dataviz` skill's checker — no validator script ships here.
 
+**Graph connection geometry (Osaka design rule, D3 network graph included):** Connection lines
+must always be straight, single-segment lines between their resolved endpoints. Do not use Bézier
+curves, edge bundling, splines, elbows, polylines, or decorative curvature unless the designer
+explicitly overrides this rule. Solve overlapping-line readability with positioning, opacity,
+filtering, hover isolation, and layering — never with curvature.
+
 ## State ownership: pick the component by which states it already has
 
 Interaction states split in two, and the split decides which component to reach for:

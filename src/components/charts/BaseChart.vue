@@ -42,12 +42,19 @@ import {
 // it and axis labels are CLIPPED at the plot edge (silently — it only logs a
 // console notice). Registered here with the modules for the same reason.
 import { LegacyGridContainLabel } from 'echarts/features'
-import { CanvasRenderer } from 'echarts/renderers'
+// SVG, not canvas. Canvas rasterizes axis labels into the bitmap at a fixed
+// device-pixel ratio, so they read as slightly soft "images" next to the DOM
+// text around them and degrade further under browser/OS zoom. The SVG renderer
+// emits real <text> nodes: crisp at any zoom, and selectable/inspectable. Our
+// charts are small (tens of marks), which is where SVG is the better trade —
+// switch a specific chart back to canvas only if one ever plots thousands of
+// points or animates a force layout.
+import { SVGRenderer } from 'echarts/renderers'
 import VChart from 'vue-echarts'
 
 // Register once, at module load. Tree-shaken: only these charts/components ship.
 use([
-  CanvasRenderer,
+  SVGRenderer,
   // cartesian
   LineChart,
   BarChart,
@@ -89,6 +96,7 @@ defineEmits<{
     role="img"
     :aria-label="title"
     :option="option"
+    :init-options="{ renderer: 'svg' }"
     :update-options="{ notMerge: true }"
     :style="{ height: `${height}px` }"
     autoresize

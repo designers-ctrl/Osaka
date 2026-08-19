@@ -64,31 +64,19 @@ export function renderCenterRing(
       .style('stop-color', stop.color)
   }
 
-  const avatarCircle = centerGroup
+  centerGroup
     .append('circle')
     .attr('class', 'center-avatar-bg')
     .attr('r', avatarRadius)
     .attr('fill', `url(#${gradientId})`)
     .attr('stroke', CENTER_AVATAR.stroke)
     .attr('stroke-width', CENTER_AVATAR.strokeWidth)
-    .style('cursor', 'pointer')
 
-  // ── HOVER HIGHLIGHTING FOR CONNECTIONS ─────────────────────────────────────
-  // On hover, highlight only connections involving this avatar node
-  const nodeId = sourceNode.id
-  avatarCircle
-    .on('mouseenter', function() {
-      viewportGroup.selectAll('.link-foreground').style('opacity', (d: any) => {
-        return d.sourceNode.id === nodeId || d.targetNode.id === nodeId ? 0.8 : 0.02
-      })
-      viewportGroup.selectAll('.link-background').style('opacity', (d: any) => {
-        return d.sourceNode.id === nodeId || d.targetNode.id === nodeId ? 0.15 : 0.005
-      })
-    })
-    .on('mouseleave', function() {
-      viewportGroup.selectAll('.link-foreground').style('opacity', 0.05)
-      viewportGroup.selectAll('.link-background').style('opacity', 0.02)
-    })
+  // NO hover handlers here — Structured hover has exactly ONE canonical
+  // application path (structuredHover.applyStructuredHoverIsolation, wired in
+  // the ring renderers). The avatar's old link-only handler competed with it
+  // and lit hub `overlap` connections whose endpoints are invisible phantom
+  // points — the class of bug the canonical path exists to prevent.
 
   // ── INITIALS TEXT ──────────────────────────────────────────────────────────
 

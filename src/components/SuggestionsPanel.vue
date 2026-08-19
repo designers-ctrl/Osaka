@@ -44,7 +44,6 @@
 -->
 
 <script setup lang="ts">
-  import { ref } from 'vue'
   import patternUrl from '@/assets/pattern.svg'
 
   export interface SuggestionRow {
@@ -60,7 +59,12 @@
     select: [id: string]
   }>()
 
-  const open = ref(false)
+  /**
+   * Open state. `defineModel` so a host can close the panel when its own flow
+   * says so — sending a message, for instance — while the panel still manages
+   * itself when nobody binds it.
+   */
+  const open = defineModel<boolean>('open', { default: false })
 </script>
 
 <template>
@@ -202,7 +206,8 @@
        layer self-clips). */
     position: absolute;
     top: 0;
-    left: 16px;
+    /* 24px in from the shell's left edge, matching the composer's own inset. */
+    left: 24px;
     transform: translateY(-100%);
     z-index: 5;
     display: flex;
@@ -312,7 +317,9 @@
     justify-content: flex-end;
     align-items: flex-start;
     gap: 16px;
-    padding: 16px 8px 8px 8px;
+    /* Even on all four sides, so the draft sits the same distance from the top
+       edge as the actions do from the bottom, at every composer height. */
+    padding: 8px;
     align-self: stretch;
     border-radius: var(--radius-xl);
     border: 1px solid rgb(var(--v-theme-button-outlined-accent-1));

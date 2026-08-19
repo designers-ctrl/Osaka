@@ -57,12 +57,18 @@
  * ALL VALUES ARE DELIBERATELY SYNTHETIC FOR DEMO PURPOSES.
  */
 
-import SlackIcon from '@/assets/nodeSourceIcons/Slack.svg'
-import LinkedInIcon from '@/assets/nodeSourceIcons/Linkedin.svg'
-import GmailIcon from '@/assets/nodeSourceIcons/Gmail.svg'
-import GoogleDriveIcon from '@/assets/nodeSourceIcons/Google drive.svg'
-import WhatsAppIcon from '@/assets/nodeSourceIcons/Whatsapp.svg'
-import SpotifyIcon from '@/assets/nodeSourceIcons/Spotify.svg'
+// The `* Logo.svg` variants are FULL-BLEED tiles: each carries its own
+// edge-to-edge brand background, so a Source circle can render one at its full
+// diameter with no inner padding and no extra backdrop of ours (the circle is
+// clipped round — see the source-icon clip in NetworkGraphD3.vue). The older
+// glyph-only files (Slack.svg, Gmail.svg, …) stay in the folder: the Document
+// icon and the Structured cluster ring still use that set.
+import SlackIcon from '@/assets/nodeSourceIcons/Slack Logo.svg'
+import LinkedInIcon from '@/assets/nodeSourceIcons/Linkedin Logo.svg'
+import GmailIcon from '@/assets/nodeSourceIcons/Gmail Logo.svg'
+import GoogleDriveIcon from '@/assets/nodeSourceIcons/Google drive Logo.svg'
+import WhatsAppIcon from '@/assets/nodeSourceIcons/Whatsapp Logo.svg'
+import SpotifyIcon from '@/assets/nodeSourceIcons/Spotify Logo.svg'
 import DocumentIcon from '@/assets/nodeSourceIcons/Document.svg'
 
 /**
@@ -136,19 +142,25 @@ export const GRAPH_SOURCE_ICONS: Record<string, string> = {
  *
  * NOTE: Documents with clusters should ALSO be in GRAPH_DOCUMENT_HUBS.
  */
+/*
+ * `ext` is the document's FILE TYPE (synthetic, like every other value here).
+ * It drives only the colour of the glyph inside the shared document icon —
+ * see src/data/documentIcon.ts for the extension → colour map. It is NOT part
+ * of the label, so the rendered node text is unaffected.
+ */
 export const GRAPH_DOCUMENTS = [
-  { id: 'doc-atlas', label: 'Project_Atlas_St…', x: 180, y: 90, size: 10 },
-  { id: 'doc-genesis', label: 'Project_Genesis…', x: 550, y: 90, size: 10 },
-  { id: 'doc-operating-model', label: 'Operating_Mod…', x: 700, y: 120, size: 10 },
-  { id: 'doc-annual', label: 'Annual_Busines…', x: 80, y: 200, size: 10 },
-  { id: 'doc-legalfab', label: 'Legalfab_SHA_…', x: 610, y: 200, size: 10 },
-  { id: 'doc-partnership', label: 'Partnership_Opp…', x: 690, y: 330, size: 10 },
-  { id: 'doc-pilot', label: 'Pilot_Onboardin…', x: 210, y: 390, size: 10 },
-  { id: 'doc-ip', label: 'IP_Transfer_Add…', x: 630, y: 430, size: 10 },
-  { id: 'doc-operating-agr', label: 'Operating_Agre…', x: 160, y: 510, size: 10 },
-  { id: 'doc-northwind', label: 'Northwind_MSA…', x: 670, y: 530, size: 10 },
-  { id: 'doc-annual-report', label: 'Annual_Business_Financial_R…', x: 50, y: 50, size: 10 },
-  { id: 'doc-atlas-status', label: 'Project_Atlas_Status', x: 120, y: 40, size: 10 },
+  { id: 'doc-atlas', label: 'Project_Atlas_St…', ext: 'docx', x: 180, y: 90, size: 10 },
+  { id: 'doc-genesis', label: 'Project_Genesis…', ext: 'docx', x: 550, y: 90, size: 10 },
+  { id: 'doc-operating-model', label: 'Operating_Mod…', ext: 'xlsx', x: 700, y: 120, size: 10 },
+  { id: 'doc-annual', label: 'Annual_Busines…', ext: 'xlsx', x: 80, y: 200, size: 10 },
+  { id: 'doc-legalfab', label: 'Legalfab_SHA_…', ext: 'pdf', x: 610, y: 200, size: 10 },
+  { id: 'doc-partnership', label: 'Partnership_Opp…', ext: 'pdf', x: 690, y: 330, size: 10 },
+  { id: 'doc-pilot', label: 'Pilot_Onboardin…', ext: 'docx', x: 210, y: 390, size: 10 },
+  { id: 'doc-ip', label: 'IP_Transfer_Add…', ext: 'pdf', x: 630, y: 430, size: 10 },
+  { id: 'doc-operating-agr', label: 'Operating_Agre…', ext: 'pdf', x: 160, y: 510, size: 10 },
+  { id: 'doc-northwind', label: 'Northwind_MSA…', ext: 'pdf', x: 670, y: 530, size: 10 },
+  { id: 'doc-annual-report', label: 'Annual_Business_Financial_R…', ext: 'xlsx', x: 50, y: 50, size: 10 },
+  { id: 'doc-atlas-status', label: 'Project_Atlas_Status', ext: 'pptx', x: 120, y: 40, size: 10 },
 ] as const
 
 /**

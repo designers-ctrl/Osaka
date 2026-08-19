@@ -25,7 +25,23 @@
  * every existing color class / `color` prop keeps working untouched.
  */
 
+/*
+ * ⚠️ ONE DEEP IMPORT, deliberately. `@carbon/icons-vue`'s barrel exports the
+ * name `Copy24` TWICE — from `copy/24` and from `image--copy/24` — which makes
+ * the binding ambiguous, so TypeScript reports it as not exported at all. The
+ * icon itself is fine; only the barrel is. Importing the module directly gets
+ * the plain copy glyph unambiguously. Everything else comes from the barrel as
+ * usual; revisit if the package fixes the duplicate.
+ */
+import Copy24 from '@carbon/icons-vue/es/copy/24.js'
+
 import {
+  CicsExplorer24,
+  ThumbsDown24,
+  ThumbsUp24,
+  FileStorage24,
+  Network_424,
+  ScisControlTower24,
   Activity24,
   Add24,
   AddAlt24,
@@ -108,7 +124,7 @@ import {
   Medication24,
   Menu24,
   MeterAlt24,
-  Microphone24,
+  MicrophoneFilled24,
   Minimize24,
   Misuse24,
   Moon24,
@@ -140,7 +156,7 @@ import {
   Scales24,
   Search24,
   Security24,
-  Send24,
+  SendFilled24,
   Settings24,
   SettingsAdjust24,
   ShoppingCart24,
@@ -212,6 +228,18 @@ export const appIcons = {
   graph: ChartRelationship24,
   graphClusters: FlowConnection24,
   graphNetwork: ChartNetwork24,
+  /** Carbon "network--4". */
+  network4: Network_424,
+  /** Carbon "IBM CICS Explorer" — the rail's Insights KPI mark. */
+  cicsExplorer: CicsExplorer24,
+  /** Carbon "IBM Supply Chain Intelligence Suite Control Tower" ("scis--control-tower")
+   *  — the rail's Entities KPI mark. */
+  scisControlTower: ScisControlTower24,
+  /**
+   * The rail's Sources KPI mark. Carbon ships no "file system" glyph in this
+   * package version — "file-storage" is the closest match and stands in.
+   */
+  fileSystem: FileStorage24,
   unlink: Unlink24,
   check: Checkmark24,
   checkAll: CheckmarkOutline24,
@@ -223,6 +251,7 @@ export const appIcons = {
   clinic: Hospital24,
   clock: Time24,
   close: Close24,
+  copy: Copy24,
   creditCard: Wallet24,
   dashboard: Dashboard24,
   document: Document24,
@@ -257,7 +286,8 @@ export const appIcons = {
   menu: Menu24,
   messages: Chat24,
   meter: MeterAlt24,
-  microphone: Microphone24,
+  // Filled glyphs: the composer's mic and send read as solid marks, not outlines.
+  microphone: MicrophoneFilled24,
   minus: Subtract24,
   night: Moon24,
   notes: ListChecked24,
@@ -285,7 +315,7 @@ export const appIcons = {
   panelCollapse: SidePanelClose24,
   panelExpand: SidePanelOpen24,
   search: Search24,
-  send: Send24,
+  send: SendFilled24,
   settings: Settings24,
   shieldCheck: Security24,
   shieldLock: Locked24,
@@ -298,6 +328,8 @@ export const appIcons = {
   tag: Tag24,
   timer: Timer24,
   tip: Idea24,
+  thumbsUp: ThumbsUp24,
+  thumbsDown: ThumbsDown24,
   // Circled lightning bolt — token / energy counts (TokensBadge). Custom svg:
   // Carbon has no circled bolt, only bare `lightning` / `flash--filled`.
   tokens: OfflineBolt,

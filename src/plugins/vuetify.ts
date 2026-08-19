@@ -100,6 +100,19 @@ export default createVuetify({
           info: '#2196F3', // informational states & badges
           success: '#4CAF50', // success states & positive metrics
           warning: '#FB8C00', // warning states & alerts
+          // colors+
+          // The Figma gray ramp. Deliberately IDENTICAL to dark — these name
+          // fixed inks from the palette (the button gray-w/black-b/white
+          // families above and below are the same way), not theme-relative
+          // surfaces. They were previously declared in the dark theme ONLY,
+          // which meant any `var(--v-theme-gray*)` reference resolved to
+          // nothing under light: an invalid value takes the whole declaration
+          // with it, so a gradient or border built on one silently disappeared
+          // rather than merely changing colour.
+          gray1: '#949B99',
+          gray2: '#3E4543',
+          gray3: '#1B2220',
+          gray4: '#0C1311',
           // ── Button tokens (Figma Button Component Set) ──
           'button-gray-w-10': 'rgba(148, 155, 153, 0.10)',
           'button-gray-w-20': 'rgba(148, 155, 153, 0.20)',
@@ -107,6 +120,12 @@ export default createVuetify({
           'button-gray-w-60': 'rgba(148, 155, 153, 0.60)',
           'button-gray-w-80': 'rgba(148, 155, 153, 0.80)',
           'button-black-b-40': 'rgba(0, 1, 1, 0.40)',
+          // Figma "Black-1" at full opacity. Deliberately IDENTICAL in light and
+          // dark, like the rest of the black-b family: it names a fixed ink from
+          // the Figma palette, not "whatever the page background happens to be".
+          // Reach for this — never `background` — when a spec calls for #000101
+          // as a mark, border or fill, or it inverts with the theme.
+          'button-black-b-100': 'rgb(0, 1, 1)',
           'button-white-5': 'rgba(255, 255, 255, 0.05)',
           'button-white-10': 'rgba(255, 255, 255, 0.10)',
           'button-white-20': 'rgba(255, 255, 255, 0.20)',
@@ -116,6 +135,18 @@ export default createVuetify({
           // ── Outlined button gradient colors ──
           'button-outlined-accent-1': '#F2C585', // Yellow/Accent 1
           'button-outlined-accent-2': '#7C6749', // Yellow/Accent 2
+          // ── Graph / data-visualisation accent ──
+          // The knowledge graph's own accent — the purple the Cluster identity
+          // is drawn in (region perimeter, expanded-region chip). Declared here
+          // rather than inside the graph so it is a real DS colour any
+          // visualisation surface can reuse, and a rebrand is one edit.
+          // Deliberately IDENTICAL in light and dark: the canvas is a fixed
+          // dark ground in both themes, so the accent must not shift with the
+          // app theme or the graph's identity would change under it.
+          'graph-accent': '#9D7EEA',
+          // Pinned rather than left to Vuetify's auto-contrast: everything
+          // sitting ON the accent (chip dot, chip label, close glyph) is black.
+          'on-graph-accent': '#000000',
         },
         // theme variables — opacities & border used app-wide
         variables: {
@@ -148,7 +179,7 @@ export default createVuetify({
           'surface-variant': '#c8c8c8', // tonal accent fills
           'on-surface-variant': '#000000', // fg on surface-variant; chips, tooltips, snackbars
           primary: '#F2C585', // main brand color lifted for legibility on dark — CTAs, links, active states
-          'primary-darken-1': '#277CC1', // hover/pressed of primary
+          'primary-darken-1': '#241B14', // deepest warm tone of the primary family — gradient bases behind gold marks
           secondary: '#7C6749', // supporting accents
           'secondary-darken-1': '#48A9A6', // hover/pressed of secondary
           error: '#FB4C75', // error & validation states, destructive actions
@@ -167,6 +198,12 @@ export default createVuetify({
           'button-gray-w-60': 'rgba(148, 155, 153, 0.60)',
           'button-gray-w-80': 'rgba(148, 155, 153, 0.80)',
           'button-black-b-40': 'rgba(0, 1, 1, 0.40)',
+          // Figma "Black-1" at full opacity. Deliberately IDENTICAL in light and
+          // dark, like the rest of the black-b family: it names a fixed ink from
+          // the Figma palette, not "whatever the page background happens to be".
+          // Reach for this — never `background` — when a spec calls for #000101
+          // as a mark, border or fill, or it inverts with the theme.
+          'button-black-b-100': 'rgb(0, 1, 1)',
           'button-white-5': 'rgba(255, 255, 255, 0.05)',
           'button-white-10': 'rgba(255, 255, 255, 0.10)',
           'button-white-20': 'rgba(255, 255, 255, 0.20)',
@@ -176,6 +213,18 @@ export default createVuetify({
           // ── Outlined button gradient colors ──
           'button-outlined-accent-1': '#F2C585', // Yellow/Accent 1
           'button-outlined-accent-2': '#7C6749', // Yellow/Accent 2
+          // ── Graph / data-visualisation accent ──
+          // The knowledge graph's own accent — the purple the Cluster identity
+          // is drawn in (region perimeter, expanded-region chip). Declared here
+          // rather than inside the graph so it is a real DS colour any
+          // visualisation surface can reuse, and a rebrand is one edit.
+          // Deliberately IDENTICAL in light and dark: the canvas is a fixed
+          // dark ground in both themes, so the accent must not shift with the
+          // app theme or the graph's identity would change under it.
+          'graph-accent': '#9D7EEA',
+          // Pinned rather than left to Vuetify's auto-contrast: everything
+          // sitting ON the accent (chip dot, chip label, close glyph) is black.
+          'on-graph-accent': '#000000',
         },
         variables: {
           'border-color': '#FFFFFF',

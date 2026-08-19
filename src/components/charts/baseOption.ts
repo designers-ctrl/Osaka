@@ -48,8 +48,23 @@ function row(color: string, label: string, value: unknown): string {
  */
 export function seriesTooltip() {
   return (params: unknown): string => {
-    const list = (Array.isArray(params) ? params : [params]) as Record<string, unknown>[]
-    const first = list[0] ?? {}
+    const all = (Array.isArray(params) ? params : [params]) as Record<string, unknown>[]
+    /*
+     * An overlay series (a trend line over bars, a marker on one category) is
+     * null everywhere it doesn't apply, and often repeats a value the primary
+     * series already reports where it does. Both would show up as rows — an
+     * empty one and a duplicate — so they're dropped here, once, for the kit.
+     */
+    const seen = new Set<string>()
+    const list = all.filter((p) => {
+      const v = Array.isArray(p.value) ? p.value[p.value.length - 1] : p.value
+      if (v == null) return false
+      const key = `${String(p.seriesName ?? p.name ?? '')}|${String(v)}`
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+    const first = all[0] ?? {}
     const header = (first.axisValueLabel as string) ?? ''
     const rows = list.map((p) => {
       const color = p.color as string

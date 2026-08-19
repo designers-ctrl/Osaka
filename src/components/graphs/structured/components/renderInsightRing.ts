@@ -18,6 +18,7 @@ import {
   INSIGHT_RING,
   getStructuredNodeRadius,
 } from '../structuredTokens'
+import { applyStructuredHoverIsolation } from '../structuredHover'
 import { NODE_STYLING } from '@/components/graphs/graphTokens'
 import type { PositionedNode } from '../useStructuredRenderer'
 import type { NetworkLink } from '@/components/charts'
@@ -59,20 +60,18 @@ export function renderInsightRing(
     .attr('fill', chartTheme?.categorical?.[0] || '#F2C585') // Yellow accent (same as Unstructured view)
     .attr('stroke', NODE_STYLING.insight.stroke) // #7C6749 — shared with Unstructured rendering
     .attr('stroke-width', INSIGHT_RING.strokeWidth)
+    // Resting yellow glow — the same filter (and tokens) Unstructured insight
+    // nodes carry; the def is declared by useStructuredRenderer for this pass.
+    .attr('filter', 'url(#insight-shadow)')
     .style('cursor', 'pointer')
-    // ── HOVER HIGHLIGHTING FOR CONNECTIONS ─────────────────────────────────────
-    .on('mouseenter', function(event, node) {
-      const nodeId = node.id
-      viewportGroup.selectAll('.link-foreground').style('opacity', (d: any) => {
-        return d.sourceNode.id === nodeId || d.targetNode.id === nodeId ? 0.8 : 0.02
-      })
-      viewportGroup.selectAll('.link-background').style('opacity', (d: any) => {
-        return d.sourceNode.id === nodeId || d.targetNode.id === nodeId ? 0.15 : 0.005
-      })
+    // ── HOVER: unified neighborhood isolation (structuredHover.ts) ───────────
+    // Same rule as cluster/entity hover, derived from the resolved drawn
+    // connections — node visibility can never disagree with link highlighting.
+    .on('mouseenter', function (_event, node) {
+      applyStructuredHoverIsolation(viewportGroup as any, node.id)
     })
-    .on('mouseleave', function() {
-      viewportGroup.selectAll('.link-foreground').style('opacity', 0.05)
-      viewportGroup.selectAll('.link-background').style('opacity', 0.02)
+    .on('mouseleave', function () {
+      applyStructuredHoverIsolation(viewportGroup as any, null)
     })
 
     // TODO: Badge rendering will be added here once insight grouping logic is defined.

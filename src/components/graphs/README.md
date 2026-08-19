@@ -29,17 +29,45 @@ The main graph component supporting both unstructured (force-directed) and struc
 ## Composables
 
 ### useD3Force
-Manages force-directed graph simulation with physics-based node positioning.
+Manages the Unstructured layout: a deterministic pre-solve, then a
+force-directed simulation. Every parameter comes from `FORCE_SIMULATION` in
+`graphTokens.ts` — none are literals here.
 
 **Forces applied:**
-- Link force: Keeps connected nodes close (strength: 0.1, distance: 30)
-- Charge force: Repels nodes (strength: -500, max distance: 300)
-- Center force: Pulls graph toward canvas center
-- Collision force: Prevents node overlap (radius: size × 0.3 + 1)
+- Link force — distance/strength by link class: ownership bonds (Source→Cluster)
+  strongest, cross-group/insight bridges tighter than generic links
+- Charge force — short-range repulsion, so separated groups stop pushing each
+  other across the canvas
+- Center force + gentle center gravity — compacts the composition
+- Collision force — prevents overlap between **all** visible kinds, sized from
+  each node's *actual* rendered radius (`getEffectiveNodeRadius`) plus
+  `nodeCollisionGap`, so weight-sized clusters and size-sized insights are
+  covered, not just the per-kind base size
+- Hub separation — hub group envelopes (orbit + largest cluster) never merge
+- Cluster orbit — each hub's clusters ease into even angular slots, with the
+  externally-connected ones claiming the slot that FACES what they connect to
+- Insight barycenter / envelope separation / link clearance / communities —
+  insights settle between the nodes they connect, outside every Source orbit,
+  and off every straight link they are not an endpoint of
+
+**Pre-solve (why the graph appears already settled):**
+`seedInitialLayout` assigns topology-aware positions before anything renders —
+hubs keep their authored positions, clusters take orbit slots, and insights are
+placed by scoring candidate positions around the barycenter of their
+connections (cost = link/node crossings ≫ node overlap > envelope intrusion >
+total length). Clusters and insights are solved *together*, iteratively, so a
+cluster ends up on the side of its Source that faces its insight.
+`warmupSimulation` then runs the physics to rest off-screen, so the first paint
+is the layout rather than the start of one.
 
 ```typescript
-const { createForceSimulation, updatePositions } = useD3Force()
+const { createForceSimulation, seedInitialLayout, warmupSimulation } = useD3Force()
+
+seedInitialLayout(nodes, links, { width, height })   // deterministic, no randomness
 const sim = createForceSimulation(nodes, links, { width, height })
+warmupSimulation(sim)                                // settle before rendering
+// …draw…
+sim.alpha(FORCE_SIMULATION.initialSettleAlpha).restart()  // small live polish
 ```
 
 ### useD3Hierarchy

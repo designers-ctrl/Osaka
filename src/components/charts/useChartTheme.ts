@@ -39,6 +39,13 @@ export interface ResolvedChartTheme {
   diverging: { negative: string, positive: string, neutral: string }
   /** Reserved state colors, resolved from the theme's status tokens. */
   status: { good: string, warning: string, critical: string, info: string }
+  /**
+   * The app's brand tokens, for DECORATIVE chart chrome only — a backdrop glow,
+   * a plot ground. Never a series color: series colors come from `categorical`,
+   * whose order is validated, and a mark wearing the brand would claim a meaning
+   * the palette already assigns to a hue.
+   */
+  brand: { primary: string, primaryDarken: string }
   /** Primary text ink (titles, values) — pulled from the theme's on-surface. */
   ink: string
   /** Recessive ink for axis labels/ticks. */
@@ -82,6 +89,10 @@ export function useChartTheme() {
         warning: c[chartPalette.status.warning] ?? onSurface,
         critical: c[chartPalette.status.critical] ?? onSurface,
         info: c[chartPalette.status.info] ?? onSurface,
+      },
+      brand: {
+        primary: c.primary ?? onSurface,
+        primaryDarken: c['primary-darken-1'] ?? c.primary ?? onSurface,
       },
       ink: onSurface,
       // Recessive inks: same hue as body text, stepped down so data leads, chrome recedes.

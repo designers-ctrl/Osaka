@@ -3,19 +3,24 @@
  *
  * Glass-morphism surface treatments for cards and chrome.
  *
- * Two reusable variants:
+ * Reusable variants:
  * - .surface--brand: Top-level chrome (logo, user avatar, notifications)
  * - .surface--card: Side-section cards (memory growth, insights, etc.)
+ * - .surface--card-flat: the same shell, no depth — small tiles (meters)
  *
  * Each combines:
  * - Linear gradient background
- * - Gradient border (1px inside stroke)
+ * - One 1px gradient border for every surface (background → surface-bright,
+ *   top → bottom), from the gradient-edge mixin
  * - Drop shadow + inner shadows
  * - Background blur for glass effect
  *
  * Colors are theme tokens from vuetify.ts (Gray/3, Gray/4, etc.), converted to
- * their hex equivalents for gradients. Inner shadows use White at 20%/40% opacity.
- * All values from Figma design spec.
+ * their hex equivalents for gradients. Inner shadows read `surface-variant` live
+ * from the Vuetify theme at 20%/40% opacity — the Figma spec called for white,
+ * but tying the rim light to a theme token keeps it in the surface family (and
+ * means it follows a theme swap instead of staying pure white).
+ * All other values from Figma design spec.
  */
 
 // ── COLOR TOKENS (mapped to vuetify.ts theme) ────────────────────────────────
@@ -23,7 +28,62 @@
 $color-gray-3: #1b2220;   // Gray/3 from vuetify.ts
 $color-gray-4: #0c1311;   // Gray/4 from vuetify.ts
 $color-black-1: #000101;  // Black/1 from vuetify.ts
-$color-white-w: #ffffff;  // Gray/W (white)
+
+// The inner-shadow rim light. Not a Sass hex: it reads the live theme token so
+// the glow tracks `surface-variant` (dark: #c8c8c8) instead of being pinned white.
+$rim-light: var(--v-theme-surface-variant);
+
+// ── MIXIN: Gradient Ring ────────────────────────────────────────────────────
+// A 1px border painted with a gradient, that FOLLOWS THE CORNER RADIUS.
+//
+// The obvious `border-image` does not: it always paints a rectangle and ignores
+// border-radius, so a rounded surface gets square corners drawn over its curve.
+// Instead the element keeps a 1px TRANSPARENT border (so the box metrics are
+// unchanged) and this pseudo-element covers the border area, fills it with the
+// gradient, then masks out everything but the 1px frame — content-box XOR
+// border-box. Requires `position: relative` and a border on the host.
+@mixin gradient-ring($gradient) {
+  &::before {
+    content: '';
+    position: absolute;
+    inset: -1px; // sit exactly on the border area
+    padding: 1px;
+    border-radius: inherit;
+    background: $gradient;
+    pointer-events: none;
+    -webkit-mask:
+      linear-gradient(#fff 0 0) content-box,
+      linear-gradient(#fff 0 0);
+    -webkit-mask-composite: xor;
+    mask:
+      linear-gradient(#fff 0 0) content-box,
+      linear-gradient(#fff 0 0);
+    mask-composite: exclude;
+  }
+}
+
+// ── MIXIN: Gradient Edge ────────────────────────────────────────────────────
+// THE house border: 1px, `background` at the top easing to `surface-bright` at
+// the bottom, so a surface is unlit where it meets the page and lifts along its
+// lower edge. Every surface in this file uses it — pass the surface's own fill.
+//
+// Two background layers with different clip boxes, under a transparent border:
+// the fill stops at the padding box, the border gradient runs to the border box
+// and is only visible in the 1px the fill vacated. Preferred over the masked
+// ::before ring because it is the element's own paint — `overflow: hidden`
+// (which .v-card sets) clips at the padding edge and would erase a pseudo-
+// element drawn in the border area. And unlike border-image, it follows the
+// corner radius.
+@mixin gradient-edge($fill) {
+  background:
+    $fill padding-box,
+    linear-gradient(
+      180deg,
+      rgb(var(--v-theme-background)) 0%,
+      rgb(var(--v-theme-surface-bright)) 100%
+    ) border-box;
+  border: 1px solid transparent;
+}
 
 // ── MIXIN: Brand Chrome Surface ─────────────────────────────────────────────
 // Top-level chrome container: logo, brand name, user avatar, notifications.
@@ -31,50 +91,62 @@ $color-white-w: #ffffff;  // Gray/W (white)
 @mixin surface-brand {
   position: relative;
 
-  // Layer 1: Background gradient (Gray/3 → Gray/4, top → bottom)
-  background: linear-gradient(180deg, $color-gray-3 0%, $color-gray-4 100%);
-
-  // Layer 2: Gradient border (1px, inside stroke)
-  border: 1px solid;
-  border-image: linear-gradient(180deg, $color-black-1 0%, $color-gray-4 100%) 1;
-  border-radius: var(--radius-lg, 12px); // 8px corner radius
+  // Layers 1 + 2: fill (Gray/3 → Gray/4) + the house gradient border.
+  @include gradient-edge(linear-gradient(180deg, $color-gray-3 0%, $color-gray-4 100%));
+  border-radius: var(--radius-md, 8px); // the DS default tier ($border-radius-root)
 
   // Layer 3: Drop shadow (X: 0, Y: 12, Blur: 24, Spread: 0)
   box-shadow:
     0 12px 24px rgba(0, 1, 1, 0.6),
-    // Inner shadow 1 (X: 0, Y: -5, Blur: 4, Spread: 0, White at 20%)
-    inset 0 -5px 4px rgba($color-white-w, 0.2),
-    // Inner shadow 2 (X: 0, Y: 4, Blur: 4, Spread: 0, White at 40%)
-    inset 0 4px 4px rgba($color-white-w, 0.4);
+    // Inner shadow 1 (X: 0, Y: -5, Blur: 4, Spread: 0, surface-variant at 20%)
+    inset 0 -5px 4px rgba($rim-light, 0.2),
+    // Inner shadow 2 (X: 0, Y: 4, Blur: 4, Spread: 0, surface-variant at 40%)
+    inset 0 4px 4px rgba($rim-light, 0.4);
 
   // Layer 4: Background blur (4px uniform)
   backdrop-filter: blur(4px);
+}
+
+// ── MIXIN: Card Shell ──────────────────────────────────────────────────────
+// Fill + border + radius: the parts every card surface shares. On its own this
+// is the FLAT card (see .surface--card-flat); .surface--card adds depth on top.
+@mixin surface-card-shell {
+  position: relative;
+
+  // Layers 1 + 2: fill (Gray/3 → Black/1) + the house gradient border.
+  @include gradient-edge(linear-gradient(180deg, $color-gray-3 0%, $color-black-1 100%));
+  border-radius: var(--radius-lg, 12px);
 }
 
 // ── MIXIN: Card Surface ────────────────────────────────────────────────────
 // Side-section cards: memory growth, insights, entity context.
 // Lighter treatment with softer shadows for visual recession.
 @mixin surface-card {
-  position: relative;
-
-  // Layer 1: Background gradient (Gray/3 → Black/1, top → bottom)
-  background: linear-gradient(180deg, $color-gray-3 0%, $color-black-1 100%);
-
-  // Layer 2 (border): intentionally none — cards are borderless; the gradient,
-  // inner shadows and blur carry the surface on their own. (Removing the old
-  // border-image also lets border-radius round the surface properly again:
-  // border-image always drew square corners over the rounding.)
-  border-radius: var(--radius-lg, 12px);
+  @include surface-card-shell;
 
   // Layer 3: Inner shadows only (no drop shadow for card recession)
   box-shadow:
-    // Inner shadow 1 (X: 0, Y: -5, Blur: 4, Spread: 0, White at 20%)
-    inset 0 -5px 4px rgba($color-white-w, 0.2),
-    // Inner shadow 2 (X: 0, Y: 4, Blur: 4, Spread: 0, White at 40%)
-    inset 0 4px 4px rgba($color-white-w, 0.4);
+    // Inner shadow 1 (X: 0, Y: -5, Blur: 4, Spread: 0, surface-variant at 20%)
+    inset 0 -5px 4px rgba($rim-light, 0.2),
+    // Inner shadow 2 (X: 0, Y: 4, Blur: 4, Spread: 0, surface-variant at 40%)
+    inset 0 4px 4px rgba($rim-light, 0.4);
 
   // Layer 4: Background blur (8px uniform, stronger than brand)
   backdrop-filter: blur(8px);
+}
+
+// ── MIXIN: Flat Card Surface ───────────────────────────────────────────────
+// The card shell with every depth cue removed: no rim light, no backdrop blur,
+// and Vuetify's own elevation shadow explicitly cleared. For small tiles — the
+// meter pair in the rail — where a bevel around a 48px donut and two lines of
+// text reads as noise rather than depth.
+@mixin surface-card-flat {
+  @include surface-card-shell;
+
+  // Not just "no inner shadow": VCard's default elevated variant brings its own
+  // drop shadow, so this has to be an explicit none rather than an omission.
+  box-shadow: none;
+  backdrop-filter: none;
 }
 
 // ── UTILITY CLASSES ────────────────────────────────────────────────────────
@@ -87,6 +159,11 @@ $color-white-w: #ffffff;  // Gray/W (white)
 // Card surfaces — side panels, memory cards, insights
 .surface--card {
   @include surface-card;
+}
+
+// Flat card surfaces — small tiles that want the shell without the depth
+.surface--card-flat {
+  @include surface-card-flat;
 }
 
 // ── VARIANT: Dark mode adjustments (if needed in future) ──────────────────────
@@ -102,30 +179,11 @@ $color-white-w: #ffffff;  // Gray/W (white)
   // Layer 1: Background gradient (Gray/3 → Black/1, top → bottom)
   background: linear-gradient(180deg, $color-gray-3 0%, $color-black-1 100%);
 
-  // Layer 2: Gradient border (1px, inside stroke). NOT border-image — that
-  // always paints square, ignoring border-radius. The transparent border
-  // keeps the box metrics, and the ::before below draws the same gradient as
-  // a masked ring that follows the card's radius (the AppButton technique).
+  // Layer 2: Gradient border (1px, inside stroke), same masked ring as .surface--brand.
   border: 1px solid transparent;
   border-radius: var(--radius-lg, 12px);
 
-  &::before {
-    content: '';
-    position: absolute;
-    inset: -1px; // sit exactly on the border area
-    padding: 1px;
-    border-radius: inherit;
-    background: linear-gradient(180deg, $color-black-1 0%, $color-gray-4 100%);
-    pointer-events: none;
-    -webkit-mask:
-      linear-gradient(#fff 0 0) content-box,
-      linear-gradient(#fff 0 0);
-    -webkit-mask-composite: xor;
-    mask:
-      linear-gradient(#fff 0 0) content-box,
-      linear-gradient(#fff 0 0);
-    mask-composite: exclude;
-  }
+  @include gradient-ring(linear-gradient(180deg, $color-black-1 0%, $color-gray-4 100%));
 
   // Layer 3: No drop or inner shadows — legend is content-focused, not embellished
   // The gradient and border provide visual grounding without extra depth.

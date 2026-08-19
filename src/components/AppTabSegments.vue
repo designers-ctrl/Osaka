@@ -27,12 +27,16 @@
     </app-tab-segments>
 
   Design (from spec):
-  - Container: Linear gradient Gray/3→Gray/4 (top→bottom), 6px radius
-  - Inner shadows: top (0, 4px blur) + bottom (0, -4px blur), both Gray/W 20%
+  - Container: shares AppButton's SECONDARY skin, so the control reads as a peer
+    of the buttons it sits beside in a toolbar — Gray/3→Gray/4 (top→bottom,
+    stopping at 23.08%), 6px radius, and a single bottom inner shadow. The spec
+    originally called for a second inner shadow on the top edge; it lit the
+    upper rim and made the container brighter than every button around it.
   - Padding/Gap: 4px (size S)
   - Tab default: no background, White/80% icon
   - Tab hover: Gray/2→Gray/3 gradient, White/5 icon
-  - Tab selected: Black/1 background, White/5 icon
+  - Tab selected: the theme's `secondary` color as the background, White/5 icon
+    (the spec's original Black/1 fill read as "disabled" beside the lit toolbar)
   - Tab disabled: White/20% icon
 -->
 
@@ -86,11 +90,13 @@ const containerClass = computed(() => ({
   background: linear-gradient(
     180deg,
     rgb(var(--v-theme-gray3)) 0%,
-    rgb(var(--v-theme-gray4)) 100%
+    rgb(var(--v-theme-gray4)) 23.08%
   );
-  box-shadow:
-    inset 0 4px 4px 0 rgba(var(--v-theme-button-gray-w-20)),
-    inset 0 -4px 4px 0 rgba(var(--v-theme-button-gray-w-20));
+  /* Bottom rim light only — the same single inset AppButton's secondary variant
+     carries, so a segmented control sits in a toolbar as a peer of the buttons
+     beside it. The spec's second inset (top, gray-w-20) lit the upper edge and
+     made the container read brighter than its neighbours. */
+  box-shadow: inset 0 -4px 4px 0 rgba(var(--v-theme-button-gray-w-20));
   transition: opacity 0.15s ease;
 }
 
@@ -199,10 +205,11 @@ const containerClass = computed(() => ({
   color: rgb(var(--v-theme-button-white-100));
 }
 
-/* Selected state: Black/1 background (the `background` theme token — see the
-   Black/1 mapping in surfaces.scss), full-white icon for clear contrast */
+/* Selected state: the theme's `secondary` color (token channel form — never a
+   hardcoded hex, so a palette edit in vuetify.ts flows straight through),
+   full-white icon for clear contrast */
 .app-tab-segments :deep(.v-btn--active) {
-  background: rgb(var(--v-theme-background));
+  background: rgb(var(--v-theme-secondary));
   color: rgb(var(--v-theme-button-white-100));
   box-shadow: none;
 }

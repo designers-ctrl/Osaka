@@ -38,6 +38,14 @@ declare module '@carbon/icons-vue' {
   export const CalendarHeatMap24: CarbonIcon
   export const CalendarTools24: CarbonIcon
   export const Camera24: CarbonIcon
+  export const CicsExplorer24: CarbonIcon
+  export const ThumbsDown24: CarbonIcon
+  export const ThumbsUp24: CarbonIcon
+  export const ScisControlTower24: CarbonIcon
+  export const FileStorage24: CarbonIcon
+  export const IbmHybridControlPlane24: CarbonIcon
+  export const IbmWebmethodsIntegrationServer24: CarbonIcon
+  export const Network_424: CarbonIcon
   export const CaretDown24: CarbonIcon
   export const CaretRight24: CarbonIcon
   export const ChartLine24: CarbonIcon
@@ -100,7 +108,7 @@ declare module '@carbon/icons-vue' {
   export const Medication24: CarbonIcon
   export const Menu24: CarbonIcon
   export const MeterAlt24: CarbonIcon
-  export const Microphone24: CarbonIcon
+  export const MicrophoneFilled24: CarbonIcon
   export const Minimize24: CarbonIcon
   export const Misuse24: CarbonIcon
   export const Moon24: CarbonIcon
@@ -132,8 +140,8 @@ declare module '@carbon/icons-vue' {
   export const Scales24: CarbonIcon
   export const Search24: CarbonIcon
   export const Security24: CarbonIcon
-  export const Send24: CarbonIcon
   export const SendAlt24: CarbonIcon
+  export const SendFilled24: CarbonIcon
   export const Settings24: CarbonIcon
   export const SettingsAdjust24: CarbonIcon
   export const ShoppingCart24: CarbonIcon

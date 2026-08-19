@@ -29,6 +29,8 @@ export interface CategoryRow {
   label: string
   value: number
   segment?: string
+  /** A second measure on the same category — what BarChart's `trend` line plots. */
+  overlay?: number
 }
 
 // ── Single-series trend — synthetic "adherence %" over 8 weeks ──
@@ -59,15 +61,16 @@ export const cohortTrend: SeriesPoint[] = [
   { week: 'W4', value: 52, series: 'Cohort C' },
 ]
 
-// ── Single-series bars — synthetic doses logged per day ──
+// ── Single-series bars — synthetic doses logged per day. `overlay` is a second
+//    measure (synthetic "reminders sent") for the trend-line demo. ──
 export const dosesByDay: CategoryRow[] = [
-  { label: 'Mon', value: 3 },
-  { label: 'Tue', value: 4 },
-  { label: 'Wed', value: 2 },
-  { label: 'Thu', value: 4 },
-  { label: 'Fri', value: 3 },
-  { label: 'Sat', value: 1 },
-  { label: 'Sun', value: 2 },
+  { label: 'Mon', value: 3, overlay: 1 },
+  { label: 'Tue', value: 4, overlay: 2 },
+  { label: 'Wed', value: 2, overlay: 4 },
+  { label: 'Thu', value: 4, overlay: 3 },
+  { label: 'Fri', value: 3, overlay: 5 },
+  { label: 'Sat', value: 1, overlay: 2 },
+  { label: 'Sun', value: 2, overlay: 1 },
 ]
 
 // ── Stacked bars — synthetic dose types per day ──

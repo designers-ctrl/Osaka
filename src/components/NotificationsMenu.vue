@@ -181,6 +181,20 @@
       rgba(var(--v-theme-gray1), 0.2) 50%,
       rgba(var(--v-theme-gray1), 0) 100%
     );
+    /*
+     * 10px of horizontal padding on both sides — an explicit one-off value, so
+     * it is written literally rather than pulled from the 4px spacing scale
+     * (which has no 10px step). `padding-inline` covers left AND right and
+     * stays correct under RTL.
+     *
+     * `background-clip: content-box` is what makes the padding VISIBLE: the
+     * divider's line is a background gradient, and a background paints across
+     * the padding box by default — so without the clip the line would still
+     * run edge to edge and the padding would do nothing. Must stay after the
+     * `background` shorthand above, which resets background-clip.
+     */
+    padding-inline: 10px;
+    background-clip: content-box;
   }
 
   /* Roughly the height of the original three-row card, so the dropdown's

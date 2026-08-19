@@ -36,6 +36,81 @@ Before any of the judgment below, the non-negotiable constraint:
   product's domain and any rules that come with it. If it still reads `{{PROJECT_DOMAIN}}`, the
   project is unconfigured — ask what the product is rather than inventing a subject.
 
+## Osaka graph-design constraints
+
+- **Graph connection geometry:** Connection lines must always be straight, single-segment lines
+  between their resolved endpoints. Do not use Bézier curves, edge bundling, splines, elbows,
+  polylines, or decorative curvature unless the designer explicitly overrides this rule.
+  This binds every graph surface — the D3 network graph (both layout modes, including the
+  Unstructured cluster drill-down layer in `src/components/graphs/expanded/`), and any future
+  relationship visualization. When many straight lines overlap, fix readability with node
+  positioning, opacity, relationship filtering, hover isolation, and layering — never by curving
+  the lines. Lines terminate at the visible node/region boundary (trimmed), not at the centers.
+
+### Unstructured layout invariants
+
+Reusable rules the Unstructured graph's layout must uphold — design to them, don't re-derive them
+per screenshot. Implementation notes live in `docs/architecture/CLUSTER_DRILLDOWN.md` and
+`src/components/graphs/useD3Force.ts`.
+
+1. **Links are always straight** (the geometry rule above). Because lines can't route around
+   things, the LAYOUT does the work:
+2. **Nodes move to protect line-of-sight** — when a line would be unreadable, move nodes
+   (forces, spacing, dimming), never bend the line.
+3. **Source clusters use orbital positioning** — a hub's clusters sit in even angular slots on a
+   consistent orbit around their Source (`forceClusterOrbit`); neighborhoods read as radial fans.
+4. **Externally connected Cluster nodes face their target/Insight** — a cluster with an outward
+   relationship should sit on its orbit toward the thing it connects to, so its line leaves the
+   neighborhood cleanly instead of crossing siblings.
+5. **Multi-group Insights pull their related groups closer** — links through an Insight (and any
+   direct cross-neighborhood link) are shorter/stronger than generic links (`crossGroup` class),
+   so related groups gravitate together.
+6. **Unrelated groups must not occupy the space between Insight-connected groups** — the corridor
+   between groups an Insight joins belongs to that relationship; keep other groups outside it.
+7. **Expanded Cluster bounds act as collision envelopes** — an expanded region occupies
+   `radius + safety gap`; collision uses the actual expanded bounds, never a fixed offset.
+8. **Nearby Insights/Sources move away from expanded envelopes** while a cluster is expanded
+   (`forceExpandedEnvelope`, registered only for the duration of the drill-down); on collapse the
+   force is removed and the graph settles back — global spacing is never permanently changed.
+9. **Multiple expanded clusters connected through one Insight form a readable, non-overlapping
+   composition** — regions separate pairwise (pairs sharing an Insight get a wider seam so the
+   Insight fits between them while staying outside every envelope), and the shared Insight is
+   eased into that gap — approximately between the clusters it joins.
+10. **Expanded entity labels appear only for entities in cross-cluster relationships** — those
+    entities explain why two regions are joined; purely internal entities stay dot-only until
+    hovered. Names are deterministic and clearly synthetic. **Labels never overlap**: after
+    entity positions settle, a deterministic collision pass (useDrilldownRenderer) re-slots each
+    label around its own dot (side / above / below / nudged, measured with real `getBBox()`
+    boxes, `collisionPad` apart, chip-aware, cross-region aware); a label with no clear slot
+    fades instead of stacking, lower placement priority first (cross-linked labels place first).
+    Dots never move to solve text overlap.
+11. **Expansion is explicit only** — clicking a Cluster expands exactly that Cluster
+    (`expandedClusterIds`). Related clusters — via direct links, entity cross-links, or shared
+    Insights — stay collapsed, fully visible and clickable (emphasized, never disabled), with
+    straight lines from the expanded Entities to their collapsed node-circle; a second region
+    opens only when the user clicks that cluster too. A Source's other clusters likewise stay
+    visible and collapsed while one of its clusters is expanded.
+    **Maximum simultaneous expanded clusters: 4** (temporary UI constraint) — the click-ordered
+    list is a FIFO window, so a fifth expansion collapses the oldest and a brief snackbar says
+    why. The evicted cluster stays visible and clickable.
+12. **Insight connections anchor to entities, not containers** — a link between an Insight and an
+    EXPANDED cluster lands on one deterministically chosen entity dot inside the region
+    (`Insight → entity`), never on the big circle itself; a collapsed cluster keeps its normal
+    node-level Insight link.
+13. **Entity hover isolates one relationship path via ONE canonical active set**
+    (`deriveHoverActiveSet`) — hovered entity + connected entities + their regions/chips + the
+    Sources/Insights/collapsed clusters genuinely on the path stay prominent; everything else,
+    including other expanded regions and their chips, drops to the disabled opacity. No renderer
+    computes its own hover opacities; mouseleave restores the exact resting expanded state.
+14. **Zoom-out is clamped near the fit-to-view scale** — Structured to the exact fit,
+    Unstructured to `fit × minZoomOutFactor` — so the graph can never shrink into an unreadable
+    speck; the initial fit and Reset framing are untouched (gesture-level clamp only).
+15. **Node size hierarchy: Source < Cluster < Insight, at every zoom level** — Sources are always
+    the smallest node kind (12 base diameter), Clusters start just above them (14) and scale with
+    weight/entity count (→ 60), Insights start clearly larger (24 → 50). Each kind's minimum
+    ON-SCREEN diameter is ordered the same way (12 / 14 / 24, `getEffectiveNodeRadius`), so
+    zooming out clamps each kind at its own floor and can never invert the hierarchy.
+
 ## Ground it in the subject
 
 If the brief doesn't pin down what the screen is for, pin it yourself before designing: name the one

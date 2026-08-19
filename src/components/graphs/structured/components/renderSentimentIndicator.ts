@@ -6,16 +6,17 @@
  * segments; the number of ACTIVE segments and the semantic status are both
  * derived from a percentage.
  *
- * Thresholds reuse the project's existing 3-segment convention (see
- * renderEntityRing.ts battery indicator): 0–33 → 1 segment / error,
- * 34–66 → 2 segments / warning, 67–100 → 3 segments / success.
+ * Thresholds (design spec for the Structured badges/meters):
+ * 0–59 → 1 segment / error, 60–84 → 2 segments / warning,
+ * 85–100 → 3 segments / success.
  *
  * Colors come from the live theme's semantic status tokens through
  * chartTheme.status (useChartTheme resolves success/warning/error from the
  * Vuetify theme), so no new palette is introduced here:
- *   - outer container  = status color at ~10% alpha
+ *   - outer container  = status color at 10% alpha
  *   - active segment   = status color at 100%
- *   - inactive segment = the shared inactive token (SENTIMENT_INDICATOR)
+ *   - inactive segment = the SAME status color at low alpha (inactiveAlpha)
+ * Alpha is applied per fill — never as opacity on the whole indicator group.
  */
 
 import * as d3 from 'd3'
@@ -39,19 +40,19 @@ export interface SentimentIndicatorOptions {
 }
 
 /**
- * Same thresholds as the entity ring's battery indicator, mapped to the
- * theme's semantic states.
+ * Design-spec thresholds mapped to the theme's semantic states:
+ * 85–100 → success, 60–84 → warning, 0–59 → error.
  */
 export function deriveSentimentStatus(percent: number): SentimentStatus {
-  if (percent >= 67) return 'success'
-  if (percent >= 34) return 'warning'
+  if (percent >= 85) return 'success'
+  if (percent >= 60) return 'warning'
   return 'error'
 }
 
-/** 1 / 2 / 3 active segments on the same 0–33 / 34–66 / 67–100 bands. */
+/** 1 / 2 / 3 active segments on the same 0–59 / 60–84 / 85–100 bands. */
 export function activeSegmentCount(percent: number): number {
-  if (percent >= 67) return 3
-  if (percent >= 34) return 2
+  if (percent >= 85) return 3
+  if (percent >= 60) return 2
   return 1
 }
 
@@ -124,16 +125,29 @@ export function renderSentimentIndicator(
 
   // Three fixed segment slots — active count derived from the percentage,
   // all slots always drawn so the component's size never changes.
+  // Active = status color at 100%; inactive = the SAME status color at
+  // inactiveAlpha. Alpha is per segment fill, never on the group.
   for (let i = 0; i < t.segments; i++) {
-    group
+    const isActive = i < activeCount
+    const segment = group
       .append('rect')
-      .attr('class', `sentiment-indicator__segment segment-${i} ${i < activeCount ? 'is-active' : ''}`)
+      .attr('class', `sentiment-indicator__segment segment-${i} ${isActive ? 'is-active' : ''}`)
       .attr('x', left + padding + i * (segmentWidth + gap))
       .attr('y', options.y + padding)
       .attr('width', segmentWidth)
       .attr('height', innerHeight)
       .attr('rx', t.segmentBorderRadius * s)
-      .attr('fill', i < activeCount ? color : t.inactiveColor)
+    if (isActive) {
+      segment.attr('fill', color)
+    } else {
+      const inactiveFill = withAlpha(color, t.inactiveAlpha)
+      if (inactiveFill === color) {
+        // Non-hex color (css var): approximate the low-alpha treatment via fill-opacity
+        segment.attr('fill', color).attr('fill-opacity', t.inactiveAlpha)
+      } else {
+        segment.attr('fill', inactiveFill)
+      }
+    }
   }
 
   return group

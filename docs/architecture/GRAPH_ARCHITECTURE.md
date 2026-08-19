@@ -296,6 +296,14 @@ Transition: Fade in/out unrelated nodes
 - **Collapse cluster:** Click cluster again (if showing entities)
 - **Show related:** Selecting node shows all connected nodes
 
+> **Implemented (Unstructured):** clicking a Cluster opens the focused
+> drill-down — the cluster becomes a large translucent region holding its real
+> entities, its Source and related neighbourhood stay emphasized, and the rest
+> of the graph dims. It is an additional rendering layer keyed off
+> `expandedClusterId`, not a layout mode. See
+> **[CLUSTER_DRILLDOWN.md](CLUSTER_DRILLDOWN.md)** for the derivation rules,
+> geometry and constraints.
+
 ### Drag
 - **Drag node:** Click+drag moves node in force layout
 - **Constrained:** Node returns to simulation when released

@@ -757,6 +757,41 @@
 
           <v-divider class="mb-12" />
 
+          <!-- ── SEAMS ───────────────────────────────────── -->
+          <section class="mb-12">
+            <div class="text-h5 font-weight-bold mb-1">Seams</div>
+            <div class="text-body-2 text-medium-emphasis mb-4">AppSeam — VDivider with a fade that reaches zero at both ends</div>
+
+            <v-card class="pa-0">
+              <div class="pa-4 text-body-medium">Between the sections of a card</div>
+              <app-seam />
+              <div class="pa-4 text-body-medium text-medium-emphasis">
+                Default: <code>surface-variant</code> at 20%, peaking at the midpoint.
+              </div>
+              <app-seam :stop="20" />
+              <div class="pa-4 text-body-medium text-medium-emphasis">
+                <code>:stop="20"</code> — the fade peaks 20% in from the left.
+              </div>
+            </v-card>
+
+            <v-card class="pa-0 mt-4">
+              <div class="d-flex align-stretch">
+                <div class="pa-4 text-body-medium flex-grow-1">Between two columns</div>
+                <app-seam vertical />
+                <div class="pa-4 text-body-medium text-medium-emphasis flex-grow-1">
+                  <code>vertical</code> — the row must be <code>align-stretch</code>.
+                </div>
+                <app-seam vertical filled :stop="32" />
+                <div class="pa-4 text-body-medium text-medium-emphasis flex-grow-1">
+                  <code>filled</code> adds a solid 1px <code>surface-bright</code> band, so the pair
+                  reads as a cut through the card rather than a rule on it.
+                </div>
+              </div>
+            </v-card>
+          </section>
+
+          <v-divider class="mb-12" />
+
           <!-- ── ELEVATION & SHADOWS ─────────────────────── -->
           <section class="mb-12">
             <div class="text-h5 font-weight-bold mb-1">Elevation &amp; shadows</div>
@@ -1149,6 +1184,110 @@
 
           <!-- ── DATA VIZ (ECharts kit) ───────────── -->
           <section class="mb-12">
+            <div class="text-h5 font-weight-bold mb-1">Assistant request card</div>
+            <div class="text-body-2 text-medium-emphasis mb-4" style="max-width: 720px">
+              RequestCard — one request in the assistant conversation, on the
+              quiet <strong>gray1 → gray2</strong> gradient surface. Text only: no avatar,
+              no icon, no reserved space. A stateless <strong>v-sheet</strong> (no
+              hover/ripple to suppress), 16px radius, a single 1px masked-gradient
+              <strong>gray1</strong> stroke — solid at the leading edge, fading with
+              the surface wash — and
+              <strong>text-body-medium</strong>, whose MD3 step is exactly the 14/400/20px
+              the design calls for. Pass <code>message</code>, or use the default slot for
+              markup.
+            </div>
+
+            <div class="d-flex flex-column ga-4" style="max-width: 560px">
+              <RequestCard
+                message="Core, I have a follow-up meeting with Northwind on Thursday — pull together what changed since the last call."
+              />
+              <RequestCard message="Short one." />
+              <RequestCard>
+                Default slot, with a long unbroken token to prove it wraps rather than
+                widening the card: https://example.com/a/very/long/path/that/keeps/going/and/going
+              </RequestCard>
+            </div>
+
+            <!--
+              The measure follows the RAIL's state, not the viewport. Both hosts
+              below are wider than either measure, so what you are seeing is the
+              card choosing its own width from the context it is in.
+            -->
+            <div class="text-title-medium font-weight-bold mt-8 mb-2">Measure by rail state</div>
+            <div class="d-flex ga-6 flex-wrap">
+              <div>
+                <div class="text-label-small text-medium-emphasis mb-2">Default sidebar — 370px</div>
+                <div style="width: 620px">
+                  <RequestCard message="In the sidebar the card caps at 370px." />
+                </div>
+              </div>
+              <div class="rail--fullscreen">
+                <div class="text-label-small text-medium-emphasis mb-2">Fullscreen assistant — 500px</div>
+                <div style="width: 620px">
+                  <RequestCard message="Inside .rail--fullscreen the same component caps at 500px." />
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <!-- ── ASSISTANT PROVENANCE (SourceChip + AssistantAccordion) ── -->
+          <section class="mb-12">
+            <div class="text-h5 font-weight-bold mb-1">Source chips &amp; reasoning accordion</div>
+            <div class="text-body-2 text-medium-emphasis mb-4" style="max-width: 720px">
+              SourceChip · AssistantAccordion — the assistant's provenance surface.
+              <strong>SourceChip</strong> resolves logos through the same source mapping the
+              graph renders, picks <strong>single</strong> (logo + name) or
+              <strong>multi</strong> (up to 3 logos, rest folded into +N) from the data, and
+              hugs its content. <strong>AssistantAccordion</strong> is the reasoning-step
+              timeline: dot + rail header, animated expand, dotted child connectors, and
+              SourceChips reused inside. All content below is synthetic demo data.
+            </div>
+
+            <div class="text-overline mb-2">Source chips</div>
+            <div class="d-flex flex-wrap align-center ga-2 mb-6">
+              <SourceChip :sources="['Google Drive']" />
+              <SourceChip :sources="['Gmail']" />
+              <SourceChip :sources="['Spotify', 'Slack', 'LinkedIn', 'Gmail', 'WhatsApp', 'Google Drive', 'Spotify']" />
+              <SourceChip label="Slack" :icon="storySourceIcons.Slack" />
+              <SourceChip :sources="[{ name: 'Pilot_Onboarding', icon: storyDocIcon('pdf') }]" />
+            </div>
+
+            <div class="text-overline mb-2">Thought toggle</div>
+            <div class="text-body-2 text-medium-emphasis mb-3" style="max-width: 720px">
+              AssistantThoughtToggle — how long the model reasoned, and the way into the
+              trail. A real <code>&lt;button&gt;</code> (keyboard activation +
+              <code>aria-expanded</code> free), hugging its content. Hover lifts the
+              surface, stroke and ink together; the chevron rotates without changing the
+              pill's dimensions.
+            </div>
+            <div class="d-flex align-center ga-3 flex-wrap mb-6">
+              <AssistantThoughtToggle :duration="32" />
+              <AssistantThoughtToggle v-model:expanded="storyThoughtOpen" :duration="8" />
+              <AssistantThoughtToggle :duration="145" label="Reasoned for" />
+              <span class="text-body-small text-medium-emphasis">
+                second one is bound: {{ storyThoughtOpen ? 'expanded' : 'collapsed' }}
+              </span>
+            </div>
+
+            <div class="text-overline mb-2">Reasoning accordion</div>
+            <div class="d-flex flex-column ga-4" style="max-width: 560px">
+              <AssistantAccordion
+                v-model="storyAccordionOpen"
+                title="What verified signals demonstrate adoption momentum?"
+                :items="storyAccordionItems"
+              />
+              <AssistantAccordion
+                title="Collapsed by default — click to expand"
+                :items="storyAccordionItems.slice(2)"
+              />
+              <AssistantAccordion
+                title="A third step, also collapsed"
+                :items="storyAccordionItems.slice(1)"
+              />
+            </div>
+          </section>
+
+          <section class="mb-12">
             <div class="text-h5 font-weight-bold mb-1">Data viz</div>
             <div class="text-body-2 text-medium-emphasis mb-4" style="max-width: 720px">
               The chart kit — pre-themed <strong>Apache ECharts</strong> charts
@@ -1179,6 +1318,26 @@
                   <div class="text-title-medium font-weight-bold mb-1">Bar · single series</div>
                   <div class="text-body-small text-medium-emphasis mb-3">Doses logged per day (synthetic)</div>
                   <BarChart :data="dosesByDay" x="label" y="value" title="Doses per day" />
+                </v-card>
+              </v-col>
+              <v-col cols="12" md="6">
+                <v-card class="pa-4" border>
+                  <div class="text-title-medium font-weight-bold mb-1">Bar · glass + trend line</div>
+                  <div class="text-body-small text-medium-emphasis mb-3">
+                    <code>trend</code> steps a SECOND measure over the bars — never a restatement of
+                    them; <code>y-ticks</code> pins the axis to four labels (synthetic)
+                  </div>
+                  <BarChart
+                    :data="dosesByDay"
+                    x="label"
+                    y="value"
+                    y-name="Doses logged"
+                    trend="overlay"
+                    trend-name="Reminders sent"
+                    :y-ticks="4"
+                    glass
+                    title="Doses logged and reminders sent per day"
+                  />
                 </v-card>
               </v-col>
               <v-col cols="12" md="6">
@@ -1281,6 +1440,32 @@
   import { useTheme } from 'vuetify'
   import type { AppIconName } from '@/icons/carbon'
   import AppPictogram from '@/components/AppPictogram.vue'
+  import AppSeam from '@/components/AppSeam.vue'
+  import RequestCard from '@/components/RequestCard.vue'
+  import AssistantThoughtToggle from '@/components/AssistantThoughtToggle.vue'
+  import SourceChip from '@/components/SourceChip.vue'
+  import AssistantAccordion, { type AssistantAccordionItem } from '@/components/AssistantAccordion.vue'
+  import { GRAPH_SOURCE_ICONS as storySourceIcons } from '@/data/graph-config'
+  import { documentIconFor as storyDocIcon } from '@/data/documentIcon'
+
+  // ── Source chips & reasoning accordion demo (synthetic, per the domain rules)
+  const storyAccordionOpen = ref(true)
+  const storyThoughtOpen = ref(false)
+  const storyAccordionItems: AssistantAccordionItem[] = [
+    {
+      text: 'Found 6 triples and 18 chunks',
+      chips: [
+        ['Google Drive'],
+        ['Gmail'],
+        ['Spotify', 'Slack', 'LinkedIn', 'Gmail', 'WhatsApp', 'Google Drive', 'Spotify'],
+      ],
+    },
+    {
+      text: 'Checking if retrieved info is sufficient for sub-question 1',
+      document: { name: 'Project_Atlas_Status', ext: 'docx' },
+    },
+    { text: 'Existing information is sufficient to answer the question' },
+  ]
   import AppTabSegments from '@/components/AppTabSegments.vue'
   import TokensBadge from '@/components/TokensBadge.vue'
   import ProfileMenu from '@/components/ProfileMenu.vue'

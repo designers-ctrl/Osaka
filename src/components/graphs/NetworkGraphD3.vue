@@ -10,22 +10,46 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, useTemplateRef, watch } from 'vue'
 import * as d3 from 'd3'
+import { useTheme } from 'vuetify'
 import type { NetworkNode, NetworkLink } from '@/components/charts'
 import { useChartTheme, withAlpha } from '@/components/charts'
 import { useD3Force } from './useD3Force'
 import { useD3Hierarchy } from './useD3Hierarchy'
 import { useD3Interaction } from './useD3Interaction'
 import { useD3Drag } from './useD3Drag'
-import { useStructuredRenderer, STRUCTURED_VIEWPORT } from './structured'
-import { SOURCE_ICONS } from '@/data/graphWorkspace'
+import { useStructuredRenderer, STRUCTURED_VIEWPORT, CLUSTER_RING, STRUCTURED_FOCUS, getStructuredClusterLabelFontSize } from './structured'
+import { applyStructuredHoverIsolation } from './structured/structuredHover'
+import { resolveClusterOwnerId } from './structured/components/renderClusterRing'
 import {
+  computeFocusCamera,
+  deriveStructuredFocus,
+  createStructuredFocus,
+  type StructuredFocusHandle,
+  type StructuredFocusModel,
+} from './structured/structuredFocus'
+import { setStructuredHoverSuspended } from './structured/structuredHover'
+import {
+  EXPANDED_CLUSTER,
+  computeRegionCenters,
+  deriveDrilldown,
+  forceExpandedEnvelope,
+  useDrilldownRenderer,
+  type DrilldownHandle,
+  type DrilldownModel,
+} from './expanded'
+import { getSourceNodeIcon, documentNodeIconFor } from '@/data/sourceNodeIcons'
+import {
+  BACKGROUND_PATTERN,
+  NODE_GLASS,
   VIEWPORT,
   LINK_STYLING,
   TYPOGRAPHY,
   SOURCE_NODES,
   NODE_DIAMETERS,
   NODE_STYLING,
+  NODE_HOVER,
   ANIMATIONS,
+  FORCE_SIMULATION,
   getEffectiveNodeRadius,
   getNodeStrokeWidth,
   getLinkStrokeWidth,
@@ -33,15 +57,31 @@ import {
   getIconDiameter,
   getSourceNodeRadius,
   getSourceIconDiameter,
+  getDocumentIconDiameter,
   getInverseZoomScale,
   getConnectionEndpoints,
 } from './graphTokens'
+import {
+  appendLinkDefs,
+  applyLinkBackgroundStyle,
+  applyLinkForegroundStyle,
+  applyLinkEndpointStyle,
+} from './linkRenderer'
 
 interface Props {
   nodes: NetworkNode[]
   links: NetworkLink[]
   height: number
   layoutMode: 'unstructured' | 'structured'
+  /**
+   * External reference highlight (the assistant answer's hovered inline ref):
+   * a node id to isolate on the canvas. Entity ids resolve to their OWNING
+   * CLUSTER through the graph's own links (never text matching), and each
+   * mode applies its OWN existing hover-isolation path — handleNodeHover for
+   * Unstructured, applyStructuredHoverIsolation for Structured. `null`
+   * restores the exact previous emphasis state.
+   */
+  highlightRefId?: string | null
   zoom?: number
   title?: string
   // Structured view only: user and sentiment data for center avatar
@@ -52,6 +92,14 @@ interface Props {
 
 interface Emits {
   (e: 'cluster-click', nodeId: string): void
+  // Unstructured drill-down state: the expanded cluster's id, or null when the
+  // focused view closes. Purely informational for the host screen — the graph
+  // owns the state itself (see `expandedClusterIds`).
+  (e: 'cluster-expand', clusterId: string | null): void
+  // The expansion cap (max simultaneously expanded clusters) evicted the
+  // oldest region to make room for the one just clicked. Carries the limit so
+  // the host screen can word its notice without duplicating the number.
+  (e: 'expand-limit', max: number): void
   // Fired on every camera change with whether the viewport currently matches
   // the initial fit-to-view framing (drives the Reset control's visibility)
   (e: 'viewport-change', atInitialView: boolean): void
@@ -65,10 +113,12 @@ const emit = defineEmits<Emits>()
 
 const containerRef = useTemplateRef<HTMLDivElement>('container')
 const svgRef = useTemplateRef<SVGSVGElement>('svg')
+const glassRef = useTemplateRef<HTMLDivElement>('glass')
+const regionGlassRef = useTemplateRef<HTMLDivElement>('regionGlass')
 
 // D3 utilities
 let zoomBehaviorInstance: d3.ZoomBehavior<SVGSVGElement, unknown> | null = null
-const { createForceSimulation, updatePositions } = useD3Force()
+const { createForceSimulation, updatePositions, seedInitialLayout, warmupSimulation } = useD3Force()
 const { createHierarchicalLayout } = useD3Hierarchy()
 const { setupNodeInteraction, setupLinkInteraction, highlightConnectedNodes, applyNodeSelection, applyLinkSelection } = useD3Interaction()
 const { createDragBehavior } = useD3Drag()
@@ -78,6 +128,22 @@ const { renderStructured, cleanupStructured } = useStructuredRenderer()
 
 // Theme colors
 const chartTheme = useChartTheme()
+
+/**
+ * Resolve a design-system colour token against the LIVE Vuetify theme.
+ *
+ * D3 draws with attribute values, so it cannot inherit a `color` prop or a
+ * utility class the way a Vuetify component does. This is the equivalent seam:
+ * layers store token NAMES (see `expandedTokens.chip`) and resolve them here,
+ * so `src/plugins/vuetify.ts` stays the single source of colour and no hex is
+ * written into a renderer. Falls back to the theme's default ink for an
+ * unknown token rather than painting nothing.
+ */
+const vuetifyTheme = useTheme()
+function themeColor(token: string): string {
+  const colors = vuetifyTheme.current.value.colors as Record<string, string>
+  return colors[token] ?? chartTheme.value.ink
+}
 const nodeColor = computed(() => (node: NetworkNode) => {
   const t = chartTheme.value
   if (node.kind === 'insight') return t.categorical[0]
@@ -108,9 +174,179 @@ let previousNodeIds: Set<string> = new Set() // Track previous node set for diff
 let followInitialFit = false
 let tickCount = 0 // === TEMPORARY DIAGNOSTIC: For tick monitoring ===
 
+// ── CLUSTER DRILL-DOWN STATE (Unstructured only) ───────────────────────────
+// An INTERACTION state, deliberately never written into the graph data: the
+// dataset, the topology and the base render are identical whether or not a
+// cluster is expanded. `expandedClusterIds` is the only switch; everything
+// else below is derived from it plus the live nodes/links (see ./expanded).
+//
+// ⚠️ EXPANSION IS EXPLICIT ONLY: an id enters this list when the user clicks
+// that cluster, and leaves it when they collapse it (region/chip ×). Related
+// clusters are NEVER auto-expanded — not for direct cluster links, entity
+// cross-links, or shared Insights; they stay collapsed, visible and clickable.
+const expandedClusterIds = ref<string[]>([])
+const { renderDrilldown, applyDrilldownEmphasis, clearDrilldownEmphasis } = useDrilldownRenderer()
+let drilldownHandle: DrilldownHandle | null = null
+/** Camera to restore when the drill-down closes. */
+let preDrilldownTransform: d3.ZoomTransform | null = null
+/** Screen position of the last pointerdown — tells a canvas click from a pan. */
+let canvasPointerDownAt: { x: number, y: number } | null = null
+
+/**
+ * Id of the round clip applied to source logo tiles (defined in the SVG defs
+ * on every render). Full-bleed square assets are clipped to the node circle.
+ */
+const SOURCE_ICON_CLIP_ID = 'source-icon-round-clip'
+
+/*
+ * Insight hover values bound into the scoped stylesheet with v-bind(), the
+ * same pattern the canvas dot grid uses: the numbers/colours stay in
+ * graphTokens (NODE_STYLING.insight.hover) and CSS just references them.
+ */
+const insightHoverFill = NODE_STYLING.insight.hover.fill
+const insightHoverTransition = NODE_STYLING.insight.hover.transition
+
+/* Collapsed-node hover glow (NODE_HOVER) — same v-bind() pattern. */
+const nodeHoverFilter = `brightness(${NODE_HOVER.brightness}) drop-shadow(0 0 ${NODE_HOVER.glow.blur}px ${NODE_HOVER.glow.color})`
+const nodeHoverTransition = NODE_HOVER.transition
+
 // Dimensions
 const width = computed(() => containerRef.value?.clientWidth || 800)
 const scaledHeight = computed(() => Math.max(320, props.height))
+
+/*
+ * The canvas dot grid, bound into the scoped stylesheet with v-bind() so the
+ * numbers stay in graphTokens.ts. CSS px are screen px — unlike anything drawn
+ * inside the <svg>, which the viewBox scales to fit the container — so the grid
+ * looks identical on a laptop and on a 5K display.
+ */
+const dotTile = `${BACKGROUND_PATTERN.spacing}px`
+/* Only the alpha is bound: the dot ink itself is the live `background` theme
+   token, composed in CSS, so it tracks a theme swap instead of being frozen
+   into a hex here. */
+const dotAlpha = `${BACKGROUND_PATTERN.opacity}`
+const dotStop = `${BACKGROUND_PATTERN.dotRadius}px`
+const dotFade = `${BACKGROUND_PATTERN.dotRadius + BACKGROUND_PATTERN.feather}px`
+
+/* Node backdrop glass: blur radius in SCREEN px, so it needs no inverse-zoom
+   compensation (see NODE_GLASS in graphTokens.ts). Applied inline by
+   updateNodeGlass() rather than in the stylesheet — see the note there. */
+const glassFilter = `blur(${NODE_GLASS.blurPx}px)`
+/* Expanded regions carry a stronger backdrop blur than plain nodes. */
+const regionGlassFilter = `blur(${EXPANDED_CLUSTER.region.glass.backdropBlurPx}px)`
+
+/**
+ * Re-clip the backdrop-glass layer to the union of every rendered node circle.
+ *
+ * Called wherever the nodes' on-screen geometry can change: after a render, on
+ * every simulation tick, and on every zoom/pan. Writes ONE `clip-path` style —
+ * no per-node elements, no per-node filters.
+ *
+ * Coordinates come from the nodes group's own screen CTM, so the mapping is
+ * exact whatever the viewBox scale, `preserveAspectRatio` letterboxing, zoom
+ * transform or container size — no duplicated projection math to drift.
+ *
+ * Nodes drawn at `opacity: 0` are skipped: the drill-down hides an expanded
+ * cluster's circle (its big region stands in for it), and a frosted disc with
+ * no node on top would be a visible artefact. Dimmed nodes keep their glass —
+ * they are still drawn.
+ */
+function updateNodeGlass() {
+  const glass = glassRef.value
+  if (!glass) return
+
+  /*
+   * Switch the layer OFF rather than clipping it to nothing.
+   *
+   * ⚠️ `clip-path: path('')` is INVALID CSS: assigning it through `.style` is
+   * silently rejected, which leaves the PREVIOUS path in place — a stale ring
+   * of frosted discs that survived a mode switch (measured: 90 circles still
+   * clipped after switching to Structured). `display: none` is unambiguous,
+   * and it also drops the compositing cost while the layer has nothing to do.
+   */
+  const regionGlass = regionGlassRef.value
+  const hide = () => {
+    glass.style.display = 'none'
+    if (regionGlass) regionGlass.style.display = 'none'
+  }
+
+  // Structured mode owns its own rendering; the glass is Unstructured-only.
+  if (props.layoutMode !== 'unstructured' || !svgRef.value || !containerRef.value) {
+    hide()
+    return
+  }
+
+  const nodesGroup = svgRef.value.querySelector('g.nodes') as SVGGElement | null
+  const ctm = nodesGroup?.getScreenCTM()
+  if (!nodesGroup || !ctm) {
+    hide()
+    return
+  }
+
+  const origin = containerRef.value.getBoundingClientRect()
+  const p = NODE_GLASS.pathPrecision
+  const parts: string[] = []
+
+  d3.select(nodesGroup).selectAll<SVGCircleElement, any>('circle.node-circle')
+    .each(function (d: any) {
+      if (this.getAttribute('opacity') === '0') return
+      const x = d?.x || 0
+      const y = d?.y || 0
+      // User space → screen, then screen → container-local (the glass's box).
+      const cx = ctm.a * x + ctm.c * y + ctm.e - origin.left
+      const cy = ctm.b * x + ctm.d * y + ctm.f - origin.top
+      // Uniform scale (aspect is preserved and zoom is uniform), so `a` alone
+      // converts the data-space radius the circle is drawn with into px.
+      const r = getEffectiveNodeRadius(d, currentZoomScale) * ctm.a
+      if (!(r > 0) || !Number.isFinite(cx) || !Number.isFinite(cy)) return
+      // One full circle as two arcs — sub-paths union under the nonzero rule.
+      parts.push(
+        `M${(cx - r).toFixed(p)},${cy.toFixed(p)}`
+        + `a${r.toFixed(p)},${r.toFixed(p)} 0 1,0 ${(r * 2).toFixed(p)},0`
+        + `a${r.toFixed(p)},${r.toFixed(p)} 0 1,0 ${(-r * 2).toFixed(p)},0Z`,
+      )
+    })
+
+  if (parts.length === 0) {
+    hide()
+    return
+  }
+  glass.style.clipPath = `path('${parts.join('')}')`
+  // Both spellings: Chrome/Edge take the standard property, older Safari the
+  // prefixed one, and assigning an unsupported property is a silent no-op.
+  glass.style.backdropFilter = glassFilter
+  ;(glass.style as any).webkitBackdropFilter = glassFilter
+  glass.style.display = 'block'
+
+  // ── The expanded regions' own (stronger) backdrop glass ─────────────────
+  // Clipped to the drill-down's region circles. Each circle's OWN screen CTM
+  // is used — it already carries the region group's translate — so there is
+  // no duplicated projection math for the region centres either.
+  if (!regionGlass) return
+  const regionParts: string[] = []
+  d3.select(svgRef.value).selectAll<SVGCircleElement, any>('circle.expanded-region-circle')
+    .each(function () {
+      const c = this.getScreenCTM()
+      if (!c) return
+      const r = Number(this.getAttribute('r') || 0) * c.a
+      const cx = c.e - origin.left
+      const cy = c.f - origin.top
+      if (!(r > 0) || !Number.isFinite(cx) || !Number.isFinite(cy)) return
+      regionParts.push(
+        `M${(cx - r).toFixed(p)},${cy.toFixed(p)}`
+        + `a${r.toFixed(p)},${r.toFixed(p)} 0 1,0 ${(r * 2).toFixed(p)},0`
+        + `a${r.toFixed(p)},${r.toFixed(p)} 0 1,0 ${(-r * 2).toFixed(p)},0Z`,
+      )
+    })
+  if (regionParts.length === 0) {
+    regionGlass.style.display = 'none'
+    return
+  }
+  regionGlass.style.clipPath = `path('${regionParts.join('')}')`
+  regionGlass.style.backdropFilter = regionGlassFilter
+  ;(regionGlass.style as any).webkitBackdropFilter = regionGlassFilter
+  regionGlass.style.display = 'block'
+}
 
 // Effective rendered node radius at the CURRENT zoom level — delegates to
 // graphTokens' single source of truth, so link endpoint geometry (every
@@ -209,11 +445,305 @@ function computeInitialTransform(): d3.ZoomTransform {
   return d3.zoomIdentity.translate(initialTx, initialTy).scale(initialScale)
 }
 
+// ── CLUSTER DRILL-DOWN (Unstructured only) ─────────────────────────────────
+// Clicking a Cluster opens a focused view: that cluster becomes a large
+// translucent region holding its REAL entities, its neighbourhood stays
+// emphasized, and the rest of the graph dims back into context.
+//
+// This is a rendering/interaction layer on top of the normal Unstructured
+// render — the base render, the dataset and the force simulation are never
+// touched. Leaving the state restores the graph exactly as it was.
+
+/** Live node lookup for the drill-down layer (positions live on these objects). */
+function currentNodeById(): Map<string, NetworkNode> {
+  return new Map((layoutNodes.value as NetworkNode[]).map(n => [n.id, n]))
+}
+
+/**
+ * ── EXTERNAL REFERENCE HIGHLIGHT ─────────────────────────────────────────
+ * The mode-specific applier, installed by whichever layout rendered last:
+ * Unstructured installs a handleNodeHover bridge; Structured installs an
+ * applyStructuredHoverIsolation bridge. One seam, no duplicate isolation
+ * logic — the watcher below only resolves ids and delegates.
+ */
+let applyExternalHighlight: ((nodeId: string | null) => void) | null = null
+
+/**
+ * Resolve a reference id to the node the CANVAS can isolate. Entities are
+ * not rendered as base nodes in either mode, so an entity reference resolves
+ * to its owning cluster through the graph's own links — the same containment
+ * relationship the layouts draw, never a text match.
+ */
+function resolveHighlightNodeId(refId: string): string | null {
+  const byId = currentNodeById()
+  const node = byId.get(refId)
+  if (!node) return null
+  if (node.kind !== 'entity') return node.id
+  for (const link of props.links as any[]) {
+    const sourceId = typeof link.source === 'object' ? link.source?.id : link.source
+    const targetId = typeof link.target === 'object' ? link.target?.id : link.target
+    const otherId = sourceId === refId ? targetId : targetId === refId ? sourceId : null
+    if (!otherId) continue
+    if (byId.get(otherId)?.kind === 'cluster') return otherId
+  }
+  return null
+}
+
+watch(() => props.highlightRefId, (refId) => {
+  if (!applyExternalHighlight) return
+  applyExternalHighlight(refId ? resolveHighlightNodeId(refId) : null)
+})
+
+/**
+ * Frame the focused neighbourhood: the expanded regions plus the emphasized
+ * base nodes around them (Sources, Insights, related clusters).
+ *
+ * Deliberately gentle — the scale is clamped to a band around the normal
+ * fit-to-view transform, so entering drill-down never zooms so far that the
+ * surrounding graph leaves the canvas. Camera only: no node moves, and the
+ * global simulation is not restarted.
+ */
+function focusCameraOnDrilldown(model: DrilldownModel) {
+  if (!svgRef.value || !zoomBehaviorInstance) return
+  const nodeById = currentNodeById()
+  const centers = computeRegionCenters(model, nodeById)
+
+  let minX = Infinity
+  let minY = Infinity
+  let maxX = -Infinity
+  let maxY = -Infinity
+  const include = (x: number, y: number, r: number) => {
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return
+    minX = Math.min(minX, x - r)
+    minY = Math.min(minY, y - r)
+    maxX = Math.max(maxX, x + r)
+    maxY = Math.max(maxY, y + r)
+  }
+
+  for (const region of model.regions) {
+    const c = centers.get(region.cluster.id)
+    if (c) include(c.x, c.y, region.radius)
+  }
+  for (const id of model.emphasizedIds) {
+    const node = nodeById.get(id)
+    if (!node || node.kind === 'entity' || model.regionById.has(id)) continue
+    include(node.x || 0, node.y || 0, getEffectiveNodeRadius(node as any, currentZoomScale))
+  }
+  if (!Number.isFinite(minX)) return
+
+  const pad = EXPANDED_CLUSTER.camera.padding
+  const boundsWidth = (maxX - minX) + pad * 2
+  const boundsHeight = (maxY - minY) + pad * 2
+  const initial = computeInitialTransform()
+  const raw = Math.min(VIEWPORT.dataWidth / boundsWidth, VIEWPORT.dataHeight / boundsHeight)
+  const scale = Math.min(
+    Math.max(raw, initial.k * EXPANDED_CLUSTER.camera.minScaleFactor, VIEWPORT.zoomExtent[0]),
+    initial.k * EXPANDED_CLUSTER.camera.maxScaleFactor,
+    VIEWPORT.zoomExtent[1],
+  )
+  const cx = (minX + maxX) / 2
+  const cy = (minY + maxY) / 2
+  const transform = d3.zoomIdentity
+    .translate(VIEWPORT.dataWidth / 2 - cx * scale, VIEWPORT.dataHeight / 2 - cy * scale)
+    .scale(scale)
+
+  d3.select(svgRef.value)
+    .transition()
+    .duration(EXPANDED_CLUSTER.camera.duration)
+    .call(zoomBehaviorInstance.transform as any, transform)
+}
+
+/** Esc closes the drill-down — the keyboard equivalent of clicking the canvas. */
+function handleDrilldownKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape') exitDrilldown()
+}
+
+/**
+ * Tear the focused layer down WITHOUT touching the camera. Used when the base
+ * render is about to be rebuilt (data change, layout switch, unmount), where
+ * restoring a stale camera would fight the new render's own framing.
+ */
+// Nodes pinned (fx/fy) for the duration of a drill-down: everything outside
+// EXPANDED_CLUSTER.envelope.localRadius, plus the clicked cluster and its hub
+// (the composition's anchor). Guarantees the expand settle is LOCAL — the far
+// graph cannot move, and the clicked cluster cannot drift.
+let drilldownPinnedNodes: any[] = []
+
+function releaseDrilldownPins() {
+  for (const n of drilldownPinnedNodes) {
+    n.fx = null
+    n.fy = null
+  }
+  drilldownPinnedNodes = []
+}
+
+function pinNodesForDrilldown(model: DrilldownModel) {
+  releaseDrilldownPins() // re-targeting: pin relative to the NEW composition
+  if (!simulation) return
+  // Locality is measured against EVERY expanded region, not just the clicked
+  // one: a related region's neighbourhood must stay free to move, otherwise
+  // its envelope would contain pinned nodes the collision force (which exempts
+  // fixed nodes) could never clear. Anchors: each region's cluster + its hub.
+  const anchors = new Set<string>()
+  const regionCenters: Array<{ x: number, y: number }> = []
+  for (const region of model.regions) {
+    anchors.add(region.cluster.id)
+    if (region.hubId) anchors.add(region.hubId)
+    regionCenters.push({ x: region.cluster.x || 0, y: region.cluster.y || 0 })
+  }
+  const localRadius = EXPANDED_CLUSTER.envelope.localRadius
+  for (const n of simulation.nodes() as any[]) {
+    const dist = Math.min(...regionCenters.map(c =>
+      Math.hypot((n.x || 0) - c.x, (n.y || 0) - c.y)))
+    if (anchors.has(n.id) || dist > localRadius) {
+      n.fx = n.x
+      n.fy = n.y
+      drilldownPinnedNodes.push(n)
+    }
+  }
+}
+
+function teardownDrilldown() {
+  if (expandedClusterIds.value.length === 0 && !drilldownHandle) return
+  drilldownHandle?.destroy()
+  drilldownHandle = null
+  expandedClusterIds.value = []
+  preDrilldownTransform = null
+  // Drop the temporary envelope collision force: it exists only while a
+  // cluster is expanded, so removing it is what lets the graph settle back to
+  // its normal global spacing (the caller decides whether to reheat).
+  simulation?.force('expandedEnvelope', null)
+  // Unpin the far graph + anchors — collapse hands the layout back whole.
+  releaseDrilldownPins()
+  window.removeEventListener('keydown', handleDrilldownKeydown)
+  // One place reports the state change, so a rebuild-driven teardown (data
+  // change, layout switch) tells the host screen exactly like a user close does.
+  emit('cluster-expand', null)
+}
+
+/**
+ * (Re)build the focused layer for the CURRENT explicit expansion list.
+ * Called on every list change — expanding a second cluster, or collapsing one
+ * of several — so the composition always reflects exactly what the user opened.
+ */
+function applyDrilldown(newlyClickedId?: string) {
+  if (props.layoutMode !== 'unstructured' || !svgRef.value) return
+  const ids = expandedClusterIds.value
+  if (ids.length === 0) { exitDrilldown(); return }
+  const model = deriveDrilldown(layoutNodes.value as NetworkNode[], props.links, ids)
+  if (!model) { exitDrilldown(); return }
+
+  const svg = d3.select(svgRef.value)
+  const viewport = svg.select<SVGGElement>('g.viewport')
+  if (viewport.empty()) return
+
+  // Growing/shrinking the composition keeps the ORIGINAL camera as the
+  // restore point, so closing always returns where the user came from.
+  const wasOpen = !!drilldownHandle
+  drilldownHandle?.destroy()
+  if (!wasOpen) preDrilldownTransform = currentZoomTransform
+  // The focused camera is the user's camera now — stop the first-load refit.
+  followInitialFit = false
+
+  drilldownHandle = renderDrilldown(viewport as any, model, {
+    nodeById: currentNodeById(),
+    entityColor: nodeColor.value({ kind: 'entity' } as NetworkNode),
+    themeColor,
+    zoomScale: currentZoomScale,
+    // Each region collapses individually; the composition rebuilds around
+    // whatever the user still has open.
+    onCollapse: (id: string) => collapseCluster(id),
+  })
+  applyDrilldownEmphasis(svg as any, model)
+  focusCameraOnDrilldown(model)
+
+  // Expanded regions become temporary occupied areas: a custom force on the
+  // EXISTING simulation pushes nearby Insights / Sources / other clusters out
+  // of the actual expanded bounds (+ safety gap), and eases Insights shared by
+  // several regions into the gap between them. Registered here, removed by
+  // teardownDrilldown — global spacing is only adjusted while expanded. The
+  // gentle reheat lets the neighbourhood breathe apart without re-running the
+  // whole layout.
+  if (simulation) {
+    // LOCAL settle only: pin the far graph and the anchors (every expanded
+    // cluster + its hub) before reheating, so the envelope push rearranges
+    // just the immediate neighbourhood and the expanded circles stay put.
+    pinNodesForDrilldown(model)
+    const envelopeForce = forceExpandedEnvelope(
+      model,
+      currentNodeById(),
+      n => getEffectiveNodeRadius(n as any, 1),
+    )
+    simulation.force('expandedEnvelope', envelopeForce as any)
+    // Deterministic warm-start: clearance is established synchronously, so it
+    // never depends on how many ticks the reheat has before alphaMin.
+    envelopeForce.presettle()
+    simulation.alpha(EXPANDED_CLUSTER.envelope.reheatAlphaEnter).restart()
+  }
+
+  // Report the cluster the user just opened (list changes without a new
+  // click — an individual collapse — report the remaining focus instead).
+  emit('cluster-expand', newlyClickedId ?? ids[ids.length - 1])
+
+  window.removeEventListener('keydown', handleDrilldownKeydown)
+  window.addEventListener('keydown', handleDrilldownKeydown)
+}
+
+/** Explicitly expand one more cluster (user click). Never automatic. */
+function expandCluster(clusterId: string) {
+  if (expandedClusterIds.value.includes(clusterId)) return
+  // TEMPORARY UI CONSTRAINT: at most `maxExpandedClusters` (4) open at once.
+  // The list is ordered by click, so the cap is a FIFO window: expanding a
+  // fifth cluster opens it and collapses the OLDEST one, always leaving the
+  // four most recently expanded. The evicted cluster returns to a normal
+  // collapsed node-circle — still visible and clickable, like every other
+  // related collapsed cluster.
+  const max = EXPANDED_CLUSTER.maxExpandedClusters
+  const next = [...expandedClusterIds.value, clusterId]
+  const evicted = next.length > max ? next.slice(0, next.length - max) : []
+  expandedClusterIds.value = evicted.length > 0 ? next.slice(next.length - max) : next
+  applyDrilldown(clusterId)
+  // Tell the host screen why a cluster closed on its own — silent eviction
+  // would read as a bug.
+  if (evicted.length > 0) emit('expand-limit', max)
+}
+
+/** Collapse ONE expanded cluster; any others the user opened stay open. */
+function collapseCluster(clusterId: string) {
+  const remaining = expandedClusterIds.value.filter(id => id !== clusterId)
+  if (remaining.length === 0) { exitDrilldown(); return }
+  expandedClusterIds.value = remaining
+  applyDrilldown()
+}
+
+/** Leave the drill-down entirely: normal Unstructured view and camera return. */
+function exitDrilldown() {
+  if (expandedClusterIds.value.length === 0 && !drilldownHandle) return
+  const svg = svgRef.value ? d3.select(svgRef.value) : null
+  // Captured BEFORE the teardown, which clears the stored camera.
+  const restoreTo = preDrilldownTransform
+  teardownDrilldown()
+  // With the envelope force gone, a gentle reheat lets the pushed-aside
+  // Insights/Sources settle back into the graph's normal spacing naturally.
+  simulation?.alpha(EXPANDED_CLUSTER.envelope.reheatAlphaExit).restart()
+  if (!svg) return
+  clearDrilldownEmphasis(svg as any)
+  if (restoreTo && zoomBehaviorInstance) {
+    svg.transition()
+      .duration(EXPANDED_CLUSTER.camera.duration)
+      .call(zoomBehaviorInstance.transform as any, restoreTo)
+  }
+}
+
 /**
  * Initialize or update the D3 visualization.
  * @param resetZoom - If true, fit the graph to the viewport. If false, preserve current zoom.
  */
 function initializeVisualization(resetZoom = true) {
+  // A rebuild wipes the SVG (and with it the focused layer): drop drill-down
+  // state first so it can never outlive the elements it decorated.
+  teardownDrilldown()
+  resetStructuredFocusState()
   console.log(`[D3] initializeVisualization called with resetZoom=${resetZoom}, isFirstInitialization=${isFirstInitialization}, currentZoomTransform=${currentZoomTransform ? 'exists' : 'null'}`)
   if (!svgRef.value || !containerRef.value) return
 
@@ -241,14 +771,48 @@ function initializeVisualization(resetZoom = true) {
       .attr('preserveAspectRatio', 'xMidYMid meet')
       .style('pointer-events', 'all')
 
+    // The camera scale this render will be shown at: the initial fit when
+    // resetting, otherwise the preserved transform. Passing it in lets
+    // zoom-aware elements (constant-screen cluster labels) render at their
+    // correct on-screen size from the very first paint, instead of being
+    // corrected by the first zoom event.
+    const structuredZoom = resetZoom
+      ? computeInitialTransform().k
+      : (currentZoomTransform?.k ?? 1)
+    // Structured's reference-highlight seam: the SAME isolation pointer
+    // hover applies, against the structured viewport group. Source/Document
+    // hubs are not ring nodes here — their representation IS their cluster
+    // neighborhoods (resolveClusterOwnerId's relationship, inverted), so a
+    // hub reference isolates all of that hub's clusters at once.
+    applyExternalHighlight = (id) => {
+      if (!svgRef.value) return
+      let target: string | string[] | null = id
+      if (id) {
+        const node = currentNodeById().get(id)
+        if (node && (node.kind === 'source' || node.kind === 'document')) {
+          target = (layoutNodes.value as NetworkNode[])
+            .filter(n => n.kind === 'cluster' && resolveClusterOwnerId(n.id) === id)
+            .map(n => n.id)
+        }
+      }
+      applyStructuredHoverIsolation(
+        d3.select(svgRef.value).select<SVGGElement>('g.viewport') as any,
+        target,
+      )
+    }
+
     renderStructured(svgRef.value, layoutNodes.value as any, props.links, {
       width: VIEWPORT.dataWidth,
       height: VIEWPORT.dataHeight,
-      zoom: 1, // TODO: Use actual zoom from component state
+      zoom: structuredZoom,
       userInitials: props.userInitials,
       sentimentPercent: props.sentimentPercent,
       sentimentLabel: props.sentimentLabel,
       chartTheme: chartTheme.value,
+      onClusterClick: (clusterId: string) => {
+        emit('cluster-click', clusterId)
+        toggleStructuredFocus(clusterId)
+      },
     })
 
     // After structured rendering, select the viewport group that was just created
@@ -275,6 +839,25 @@ function initializeVisualization(resetZoom = true) {
   // Groups for layers
   const defs = svg.append('defs')
 
+  /*
+   * ROUND CLIP for the source logo tiles. The assets are full-bleed SQUARES,
+   * and a source icon now renders at the node's FULL diameter (zero inner
+   * padding), so the square's corners must be clipped back to the circle —
+   * the SVG equivalent of `object-fit: cover` on a round element.
+   *
+   * `clipPathUnits="objectBoundingBox"` makes the clip relative to each
+   * image's own box (a unit circle at its centre), so ONE def serves every
+   * source at every zoom level: the clip follows the image as the min-screen
+   * clamp resizes it and as the node moves, with nothing to update per tick.
+   */
+  defs.append('clipPath')
+    .attr('id', SOURCE_ICON_CLIP_ID)
+    .attr('clipPathUnits', 'objectBoundingBox')
+    .append('circle')
+    .attr('cx', 0.5)
+    .attr('cy', 0.5)
+    .attr('r', 0.5)
+
   // Arrow marker for directed links
   defs.append('marker')
     .attr('id', 'arrowhead')
@@ -287,76 +870,70 @@ function initializeVisualization(resetZoom = true) {
     .attr('points', '0 0, 10 3, 0 6')
     .attr('fill', withAlpha(chartTheme.value.ink, 0.4))
 
-  // Drop shadow filter for insight nodes
+  /*
+   * INSIGHT GLOW — the warm halo every Insight node carries.
+   *
+   * An SVG <filter> rather than a CSS `filter`: D3 sets these circles'
+   * paint as presentation ATTRIBUTES, and the CSS property competes with the
+   * `filter` attribute (and with the hover rule in this component's
+   * stylesheet), so the effect belongs in the SVG where the render pipeline
+   * cannot drop it.
+   *
+   * The region is widened well past the default (−10% … 120%): on a ~20px
+   * insight that default left ~2px of margin and cut the halo off square,
+   * which looked exactly like a filter that was not applying. All values
+   * come from NODE_STYLING.insight.glow.
+   */
+  const insightGlow = NODE_STYLING.insight.glow
+  const glowMargin = insightGlow.regionMargin
   defs.append('filter')
     .attr('id', 'insight-shadow')
+    .attr('x', `${-glowMargin * 100}%`)
+    .attr('y', `${-glowMargin * 100}%`)
+    .attr('width', `${(1 + glowMargin * 2) * 100}%`)
+    .attr('height', `${(1 + glowMargin * 2) * 100}%`)
     .append('feDropShadow')
     .attr('dx', 0)
     .attr('dy', 0)
-    .attr('stdDeviation', 2)
-    .attr('flood-color', '#7C6749')
-    .attr('flood-opacity', 0.8)
+    // CSS blur radius → feDropShadow stdDeviation (CSS blur = 2 × stdDev)
+    .attr('stdDeviation', insightGlow.blur / 2)
+    .attr('flood-color', insightGlow.color)
+    .attr('flood-opacity', insightGlow.opacity)
+
+  /*
+   * HOVER GLOW — the same construction, wider and warm-white, swapped in by
+   * the `:hover` rule in this component's stylesheet. Two defs rather than an
+   * animated one: a filter's primitives are shared by every element that
+   * references it, so per-element hover state has to be a different filter.
+   */
+  const insightHoverGlow = NODE_STYLING.insight.hover.glow
+  const hoverMargin = insightHoverGlow.regionMargin
+  defs.append('filter')
+    .attr('id', 'insight-shadow-hover')
+    .attr('x', `${-hoverMargin * 100}%`)
+    .attr('y', `${-hoverMargin * 100}%`)
+    .attr('width', `${(1 + hoverMargin * 2) * 100}%`)
+    .attr('height', `${(1 + hoverMargin * 2) * 100}%`)
+    .append('feDropShadow')
+    .attr('dx', 0)
+    .attr('dy', 0)
+    .attr('stdDeviation', insightHoverGlow.blur / 2)
+    .attr('flood-color', insightHoverGlow.color)
+    .attr('flood-opacity', insightHoverGlow.opacity)
 
   // Blur filter for connection line glow and endpoints
-  defs.append('filter')
-    .attr('id', 'link-background-blur')
-    .append('feGaussianBlur')
-    .attr('in', 'SourceGraphic')
-    .attr('stdDeviation', LINK_STYLING.blur.amount)
+  // Every def a connection references — the luminous foreground gradient, the
+  // atmospheric background gradient, the background blur and the endpoint blur.
+  // Built by the shared builder, which the Structured pass calls too: a paint
+  // server and a filter are per-SVG, and each mode rebuilds the document, so one
+  // builder is what keeps them identical instead of hand-matched. The layer
+  // STYLES that reference them are shared the same way (see linkRenderer.ts).
+  appendLinkDefs(defs as any)
 
-  defs.append('filter')
-    .attr('id', 'link-endpoint-blur')
-    .append('feGaussianBlur')
-    .attr('in', 'SourceGraphic')
-    .attr('stdDeviation', LINK_STYLING.blur.endpointBlur)
-
-  // Foreground gradient (luminous) - increased opacity for visibility
-  const fgGradient = defs.append('linearGradient')
-    .attr('id', 'link-gradient-foreground')
-    .attr('x1', '0%')
-    .attr('y1', '0%')
-    .attr('x2', '100%')
-    .attr('y2', '0%')
-  fgGradient.append('stop').attr('offset', '0%').attr('stop-color', '#FFFFFF').attr('stop-opacity', 0.2)
-  fgGradient.append('stop').attr('offset', '40%').attr('stop-color', '#FFFFFF').attr('stop-opacity', 0.8)
-  fgGradient.append('stop').attr('offset', '60%').attr('stop-color', '#FFFFFF').attr('stop-opacity', 0.8)
-  fgGradient.append('stop').attr('offset', '100%').attr('stop-color', '#FFFFFF').attr('stop-opacity', 0.2)
-
-  // Background gradient (atmospheric) - increased opacity for perceptibility
-  const bgGradient = defs.append('linearGradient')
-    .attr('id', 'link-gradient-background')
-    .attr('x1', '0%')
-    .attr('y1', '0%')
-    .attr('x2', '100%')
-    .attr('y2', '0%')
-  bgGradient.append('stop').attr('offset', '0%').attr('stop-color', '#949B99').attr('stop-opacity', 0.2)
-  bgGradient.append('stop').attr('offset', '48%').attr('stop-color', '#949B99').attr('stop-opacity', 0.08)
-  bgGradient.append('stop').attr('offset', '99%').attr('stop-color', '#949B99').attr('stop-opacity', 0.2)
-
-  // Dotted background pattern - Edit color at line 223
-  const dotPattern = defs.append('pattern')
-    .attr('id', 'dotted-background')
-    .attr('x', 20)
-    .attr('y', 20)
-    .attr('width', 20)
-    .attr('height', 20)
-    .attr('patternUnits', 'userSpaceOnUse')
-  dotPattern.append('circle')
-    .attr('cx', 10)
-    .attr('cy', 10)
-    .attr('r', 1.5)
-    .attr('fill', '#030504')
-    .attr('opacity', 0.3)
-
-
-    // Fixed background layer (not affected by zoom/pan transform)
-    svg.append('rect')
-      .attr('x', 0)
-      .attr('y', 0)
-      .attr('width', dataWidth)
-      .attr('height', dataHeight)
-      .attr('fill', 'url(#dotted-background)')
-      .style('pointer-events', 'none')
+    // The dot grid is NOT drawn here. Anything inside this <svg> lives in the
+    // 800×600 data space and is scaled to fit the container, so an SVG pattern
+    // grew with the window. It is painted in CSS on the container instead —
+    // see BACKGROUND_PATTERN in graphTokens.ts and the stylesheet below.
     g = svg.append('g')
       .attr('class', 'viewport')
       .style('pointer-events', 'auto')
@@ -377,6 +954,31 @@ function initializeVisualization(resetZoom = true) {
 
   // Prepare links (only between visible nodes)
   const visibleNodeIds = new Set(visibleNodes.map((n: any) => n.id))
+
+  // ── PRE-SOLVE THE UNSTRUCTURED LAYOUT (before anything is drawn) ──────────
+  // The simulation is built, seeded from the graph's topology and warmed up
+  // OFF-SCREEN here, so the geometry every element below is drawn with is
+  // already the settled layout. Without this, nodes were painted at their
+  // authored positions and then visibly slid around for seconds while the
+  // force ran at full alpha. The tick handler and drag are wired further
+  // down, once the nodes exist; the simulation stays stopped until then.
+  if (props.layoutMode === 'unstructured') {
+    const visibleLinks = props.links.filter(link => {
+      const sourceId = typeof link.source === 'string' ? link.source : (link.source as any).id
+      const targetId = typeof link.target === 'string' ? link.target : (link.target as any).id
+      return visibleNodeIds.has(sourceId) && visibleNodeIds.has(targetId)
+    })
+    // Re-seed only on a full (re)entry into the view. An in-place rebuild
+    // that preserves the camera also preserves where the user left the graph.
+    if (resetZoom) {
+      seedInitialLayout(visibleNodes as any, visibleLinks, { width: dataWidth, height: dataHeight })
+    }
+    simulation = createForceSimulation(visibleNodes, visibleLinks, {
+      width: dataWidth,
+      height: dataHeight,
+    })
+    warmupSimulation(simulation)
+  }
   const linkData = props.links
     .map(link => ({
       source: typeof link.source === 'string'
@@ -396,11 +998,11 @@ function initializeVisualization(resetZoom = true) {
     .enter()
     .append('line')
     .attr('class', 'link-line-background')
-    .attr('stroke', 'url(#link-gradient-background)')
-    .attr('stroke-width', (d: any) => getLinkStrokeWidth(d.kind, currentZoomScale) * 1.5) // Slightly wider for glow effect
-    .attr('stroke-dasharray', (d: any) => d.kind === 'overlap' ? LINK_STYLING.strokeDasharray.overlap : LINK_STYLING.strokeDasharray.default)
-    .attr('opacity', 0.25) // Increased from 0.3 (0.6*0.5) for better visibility
-    .attr('filter', 'url(#link-background-blur)')
+    // Style from the shared connection language (linkRenderer.ts) — the same
+    // functions the Structured focus applies, so the two cannot drift apart.
+    .each(function (this: SVGLineElement, d: any) {
+      applyLinkBackgroundStyle(d3.select(this), { zoomScale: currentZoomScale, kind: d.kind })
+    })
     .attr('x1', (d: any) => {
       const sourceRadius = getNodeRadiusFromData(d.source)
       const targetRadius = getNodeRadiusFromData(d.target)
@@ -433,10 +1035,9 @@ function initializeVisualization(resetZoom = true) {
     .enter()
     .append('line')
     .attr('class', 'link-line-foreground')
-    .attr('stroke', 'url(#link-gradient-foreground)')
-    .attr('stroke-width', (d: any) => getLinkStrokeWidth(d.kind, currentZoomScale))
-    .attr('stroke-dasharray', (d: any) => d.kind === 'overlap' ? LINK_STYLING.strokeDasharray.overlap : LINK_STYLING.strokeDasharray.default)
-    .attr('opacity', 0.9) // Increased from 0.6 for clear visibility; removed luminosity blend mode
+    .each(function (this: SVGLineElement, d: any) {
+      applyLinkForegroundStyle(d3.select(this), { zoomScale: currentZoomScale, kind: d.kind })
+    })
     .attr('x1', (d: any) => {
       const sourceRadius = getNodeRadiusFromData(d.source)
       const targetRadius = getNodeRadiusFromData(d.target)
@@ -478,10 +1079,9 @@ function initializeVisualization(resetZoom = true) {
     .enter()
     .append('circle')
     .attr('class', 'link-endpoint')
-    .attr('r', LINK_STYLING.endpoints.radius * getInverseZoomScale(currentZoomScale))
-    .attr('fill', LINK_STYLING.endpoints.fill)
-    .attr('opacity', LINK_STYLING.endpoints.opacity)
-    .attr('filter', 'url(#link-endpoint-blur)')
+    .each(function (this: SVGCircleElement) {
+      applyLinkEndpointStyle(d3.select(this), currentZoomScale)
+    })
     .attr('cx', (d: any) => {
       const sourceRadius = getNodeRadiusFromData(d.source)
       const targetRadius = getNodeRadiusFromData(d.target)
@@ -503,7 +1103,7 @@ function initializeVisualization(resetZoom = true) {
     .data(visibleNodes, (d: any) => d.id)
     .enter()
     .append('circle')
-    .attr('class', 'node-circle')
+    .attr('class', (d: any) => d.kind === 'insight' ? 'node-circle insight-node' : 'node-circle')
     .attr('cx', (d: any) => d.x || 0)
     .attr('cy', (d: any) => d.y || 0)
     // Single source of truth: same effective radius the link endpoint
@@ -535,17 +1135,21 @@ function initializeVisualization(resetZoom = true) {
   // Both live in data space at their base token size so they scale naturally
   // with their node when zooming (no inverse-zoom compensation).
   const sourceIconDiameter = getSourceIconDiameter(currentZoomScale)
-  const documentIconDiameter = getIconDiameter('document')
+  const documentIconDiameter = getDocumentIconDiameter(currentZoomScale)
   nodes.each(function (this: any, nodeData: any) {
     const parentNode = this.parentNode as SVGElement | null
     if (!parentNode) return
 
     // Determine icon href based on node kind
     let iconHref: string | null = null
-    if (nodeData.kind === 'source' && SOURCE_ICONS[nodeData.id]) {
-      iconHref = SOURCE_ICONS[nodeData.id]
-    } else if (nodeData.kind === 'document' && nodeData.sourceIcon) {
-      iconHref = nodeData.sourceIcon
+    if (nodeData.kind === 'source') {
+      // Theme-surface tile + brand glyph (sourceNodeIcons.ts) — the graph-node
+      // variant of the brand assets; chips keep the original brand tiles.
+      iconHref = getSourceNodeIcon(nodeData.id)
+    } else if (nodeData.kind === 'document') {
+      // Built at render time so the tile reads the LIVE theme surface token
+      // (the dataset module loads pre-mount). Same renderer Structured uses.
+      iconHref = documentNodeIconFor(nodeData.ext)
     }
 
     // Render icon (class + size differ by kind, see comment above)
@@ -561,6 +1165,9 @@ function initializeVisualization(resetZoom = true) {
         .attr('width', iconDiameter)
         .attr('height', iconDiameter)
         .attr('href', iconHref)
+        // Both hub kinds are full-bleed SQUARE tiles filling the whole
+        // circle, so both are clipped back to it.
+        .attr('clip-path', `url(#${SOURCE_ICON_CLIP_ID})`)
         .attr('opacity', SOURCE_NODES.icon.opacity)
     }
   })
@@ -581,7 +1188,7 @@ function initializeVisualization(resetZoom = true) {
     .attr('font-style', TYPOGRAPHY.source.fontStyle)
     .attr('font-weight', TYPOGRAPHY.source.fontWeight)
     .attr('fill', chartTheme.value.ink)
-    .attr('opacity', TYPOGRAPHY.source.opacity)
+    .attr('opacity', TYPOGRAPHY.restingOpacity)
     .style('line-height', `${TYPOGRAPHY.source.lineHeight}px`)
     // Text stroke for readability: outline effect
     .style('-webkit-text-stroke-color', (TYPOGRAPHY.source as any).textStroke)
@@ -604,7 +1211,7 @@ function initializeVisualization(resetZoom = true) {
     .attr('font-style', TYPOGRAPHY.document.fontStyle)
     .attr('font-weight', TYPOGRAPHY.document.fontWeight)
     .attr('fill', chartTheme.value.ink)
-    .attr('opacity', TYPOGRAPHY.document.opacity)
+    .attr('opacity', TYPOGRAPHY.restingOpacity)
     .style('line-height', `${TYPOGRAPHY.document.lineHeight}px`)
     // Text stroke for readability: outline effect (same as source)
     .style('-webkit-text-stroke-color', (TYPOGRAPHY.document as any).textStroke)
@@ -624,19 +1231,25 @@ function initializeVisualization(resetZoom = true) {
     })
   }
 
-  // Keep labels in sync with the same connected-node set the node/link/endpoint
-  // highlight uses: the hovered node's and its direct neighbors' labels stay at
-  // full emphasis, all others dim to the low-emphasis opacity the dimmed nodes
-  // use (0.2, see applyNodeSelection). Opacity only — labels stay in the DOM,
-  // so there is no layout shift; an empty set restores the normal opacities.
+  /*
+   * Labels are REVEALED, not dimmed. At rest nothing is labelled
+   * (TYPOGRAPHY.restingOpacity); on hover/focus the same connected-node set the
+   * node/link/endpoint highlight uses gets its labels at full emphasis, and
+   * everything else stays hidden rather than dropping to a dim tier — with the
+   * resting state already blank, a "dimmed" label would be the only text on
+   * screen competing with the one the user is actually pointing at.
+   *
+   * Opacity only: the text never leaves the DOM, so there is no layout shift,
+   * no re-measure, and the node data behind each label is untouched.
+   */
   const applyLabelSelection = (selectedNodes: Set<string>) => {
-    const dimmed = 0.2
+    const resting = TYPOGRAPHY.restingOpacity
     svg.selectAll('text.source-label')
       .attr('opacity', (d: any) =>
-        selectedNodes.size === 0 || selectedNodes.has(d.id) ? TYPOGRAPHY.source.opacity : dimmed)
+        selectedNodes.has(d.id) ? TYPOGRAPHY.source.opacity : resting)
     svg.selectAll('text.document-label')
       .attr('opacity', (d: any) =>
-        selectedNodes.size === 0 || selectedNodes.has(d.id) ? TYPOGRAPHY.document.opacity : dimmed)
+        selectedNodes.has(d.id) ? TYPOGRAPHY.document.opacity : resting)
   }
 
   // Keep node icons in sync with the same connected-node set: icons inside the
@@ -653,6 +1266,10 @@ function initializeVisualization(resetZoom = true) {
 
   // Handle hover highlighting
   const handleNodeHover = (nodeId: string | null, allNodes: NetworkNode[], allLinks: any[]) => {
+    // While a cluster is expanded, the drill-down owns emphasis on the canvas —
+    // a base hover would fight its dim state. Hover inside the expanded view is
+    // handled by the focused layer itself (entity hover isolates its paths).
+    if (expandedClusterIds.value.length > 0) return
     if (nodeId) {
       const connected = highlightConnectedNodes(nodeId, allNodes, allLinks)
       applyNodeSelection(nodes, connected)
@@ -680,9 +1297,55 @@ function initializeVisualization(resetZoom = true) {
     }
   }
 
+  // The reference-highlight seam takes the SAME path a pointer hover takes.
+  applyExternalHighlight = id => handleNodeHover(id, layoutNodes.value as any, linkData)
+
   setupNodeInteraction(
     nodes,
     (nodeId: string) => {
+      const clicked = layoutNodes.value.find((n: any) => n.id === nodeId) as NetworkNode | undefined
+
+      // Clicking a Cluster in Unstructured mode toggles ITS expansion —
+      // clicking a collapsed cluster (related or not) expands only that
+      // cluster, ADDING it to whatever the user already has open; clicking an
+      // expanded one collapses just it. Never auto-expands anything else.
+      if (props.layoutMode === 'unstructured' && clicked?.kind === 'cluster') {
+        if (expandedClusterIds.value.includes(nodeId)) collapseCluster(nodeId)
+        else expandCluster(nodeId)
+        emit('cluster-click', nodeId)
+        return
+      }
+
+      // Any NON-cluster node clicked while drilled down closes the focused
+      // view — the base selection below owns the canvas again.
+      if (expandedClusterIds.value.length > 0) {
+        exitDrilldown()
+        return
+      }
+
+      /*
+       * Clicking a SOURCE frames its own neighbourhood: that hub plus the
+       * clusters actually bound to it, and nothing else. Membership comes from
+       * the resolved link list rather than an id convention, so "connected"
+       * means a real relationship. Reset returns to the initial framing.
+       */
+      if (props.layoutMode === 'unstructured' && clicked?.kind === 'source') {
+        const endpointId = (e: any) => (typeof e === 'string' ? e : e?.id)
+        const group = new Map<string, any>([[clicked.id, clicked]])
+        for (const link of linkData as any[]) {
+          const sId = endpointId(link.source)
+          const tId = endpointId(link.target)
+          if (sId !== nodeId && tId !== nodeId) continue
+          const other = sId === nodeId ? link.target : link.source
+          if (other && typeof other === 'object' && other.kind === 'cluster') {
+            group.set(other.id, other)
+          }
+        }
+        fitCameraToNodes([...group.values()])
+        emit('cluster-click', nodeId)
+        return
+      }
+
       selectedCluster.value = selectedCluster.value === nodeId ? null : nodeId
       emit('cluster-click', nodeId)
 
@@ -709,19 +1372,9 @@ function initializeVisualization(resetZoom = true) {
     linkData,
   )
 
-  // Setup force simulation for unstructured layout (only on visible nodes)
-  if (props.layoutMode === 'unstructured') {
-    // Filter props.links to only include visible nodes
-    const visibleLinks = props.links.filter(link => {
-      const sourceId = typeof link.source === 'string' ? link.source : (link.source as any).id
-      const targetId = typeof link.target === 'string' ? link.target : (link.target as any).id
-      return visibleNodeIds.has(sourceId) && visibleNodeIds.has(targetId)
-    })
-    simulation = createForceSimulation(visibleNodes, visibleLinks, {
-      width: dataWidth,
-      height: dataHeight,
-    })
-
+  // Wire up the pre-solved simulation (created and warmed up above, before
+  // anything was drawn — see the PRE-SOLVE block).
+  if (props.layoutMode === 'unstructured' && simulation) {
     // Apply drag behavior to nodes
     nodes.call(createDragBehavior(simulation))
     // Grabbing a node restarts the simulation — hand the camera to the user
@@ -843,7 +1496,7 @@ function initializeVisualization(resetZoom = true) {
       svg.selectAll('image.source-icon')
         .attr('x', (d: any) => (d.x || 0) - sourceIconHalf)
         .attr('y', (d: any) => (d.y || 0) - sourceIconHalf)
-      const documentIconHalf = getIconDiameter('document') / 2
+      const documentIconHalf = getDocumentIconDiameter(currentZoomScale) / 2
       svg.selectAll('image.document-icon')
         .attr('x', (d: any) => (d.x || 0) - documentIconHalf)
         .attr('y', (d: any) => (d.y || 0) - documentIconHalf)
@@ -868,7 +1521,20 @@ function initializeVisualization(resetZoom = true) {
         }
         svg.call(zoomBehaviorInstance.transform, computeInitialTransform())
       }
+
+      // Keep the focused layer glued to the base positions it is derived from
+      // (a dragged Source carries its expanded region and entities along).
+      // Geometry only — the drill-down never writes back into the simulation.
+      drilldownHandle?.update(currentZoomScale)
+
+      // Re-clip the backdrop glass to wherever the nodes just moved to.
+      updateNodeGlass()
     })
+
+    // The layout is already solved; this is the small natural adjustment pass
+    // on top of it, not the run that produces it. Low alpha = the graph is
+    // alive and settles in a moment, instead of reflowing on screen.
+    simulation.alpha(FORCE_SIMULATION.initialSettleAlpha).restart()
   } else {
     // Static hierarchical layout
     nodes
@@ -949,7 +1615,7 @@ function initializeVisualization(resetZoom = true) {
     svg.selectAll('image.source-icon')
       .attr('x', (d: any) => (d.x || 0) - sourceIconHalf)
       .attr('y', (d: any) => (d.y || 0) - sourceIconHalf)
-    const documentIconHalf = getIconDiameter('document') / 2
+    const documentIconHalf = getDocumentIconDiameter(currentZoomScale) / 2
     svg.selectAll('image.document-icon')
       .attr('x', (d: any) => (d.x || 0) - documentIconHalf)
       .attr('y', (d: any) => (d.y || 0) - documentIconHalf)
@@ -965,9 +1631,23 @@ function initializeVisualization(resetZoom = true) {
     }
   } // End of else (unstructured rendering)
 
-  // Setup D3 zoom and pan — applies to both structured and unstructured modes
+  // Setup D3 zoom and pan — applies to both structured and unstructured modes.
+  // Both clamp the MINIMUM zoom relative to the initial fit-to-view scale: the
+  // first-entry framing is already the complete graph, so zooming out much
+  // past it only shrinks nodes/labels below readability. Structured clamps to
+  // the exact fit; Unstructured allows a small margin below it
+  // (minZoomOutFactor). Gesture-level only (wheel, pinch, and the +/− buttons
+  // via scaleBy all route through this extent) — the initial fit is applied
+  // with zoom.transform, which d3 never clamps, so first-entry framing and
+  // Reset are unchanged.
+  const scaleExtent: [number, number] = props.layoutMode === 'structured'
+    ? [computeInitialTransform().k, VIEWPORT.zoomExtent[1]]
+    : [
+        Math.max(VIEWPORT.zoomExtent[0], computeInitialTransform().k * VIEWPORT.minZoomOutFactor),
+        VIEWPORT.zoomExtent[1],
+      ]
   zoomBehaviorInstance = d3.zoom<SVGSVGElement, unknown>()
-    .scaleExtent(VIEWPORT.zoomExtent)
+    .scaleExtent(scaleExtent)
     .wheelDelta((event) => {
       // Invert scroll direction: up scrolls = zoom out, down scrolls = zoom in
       const deltaSensitivity = event.deltaMode === 1
@@ -1003,13 +1683,21 @@ function initializeVisualization(resetZoom = true) {
         // Update node stroke widths
         nodes.attr('stroke-width', (d: any) => getNodeStrokeWidth(d.kind, currentZoomScale))
 
-        // Source circles + icons hold their 16px minimum on-screen diameter:
-        // at normal zoom both keep their base size and scale naturally; when
-        // zoomed out past the clamp they resize together, preserving
-        // `icon + 2 × padding = node diameter`. Document icons stay untouched
-        // (base size in data space, natural scaling).
-        nodes.filter((d: any) => d.kind === 'source')
-          .attr('r', getSourceNodeRadius(currentZoomScale))
+        // EVERY node kind holds its own minimum on-screen diameter (source 12,
+        // cluster 14, insight 24 — the ordered clamp ladder that keeps the
+        // Source < Cluster < Insight hierarchy true at every zoom level; see
+        // getEffectiveNodeRadius). At normal zoom each keeps its base size and
+        // scales naturally; zoomed out past its clamp it resizes to hold the
+        // floor. Sources/documents also resize their icons with the circle,
+        // preserving `icon + 2 × padding = node diameter`.
+        nodes.attr('r', (d: any) => getEffectiveNodeRadius(d, currentZoomScale))
+        const docIconDiam = getDocumentIconDiameter(currentZoomScale)
+        const docIconHalf = docIconDiam / 2
+        svg.selectAll('image.document-icon')
+          .attr('width', docIconDiam)
+          .attr('height', docIconDiam)
+          .attr('x', (d: any) => (d.x || 0) - docIconHalf)
+          .attr('y', (d: any) => (d.y || 0) - docIconHalf)
         const srcIconDiam = getSourceIconDiameter(currentZoomScale)
         const srcIconHalf = srcIconDiam / 2
         svg.selectAll('image.source-icon')
@@ -1050,6 +1738,23 @@ function initializeVisualization(resetZoom = true) {
 
         // Re-setup link interaction with current zoom scale for hover effects
         setupLinkInteraction(links, linksBackground, currentZoomScale)
+
+        // The focused layer follows the same constant-screen conventions
+        // (stroke widths, label floors), so it re-sizes with the zoom too.
+        drilldownHandle?.update(currentZoomScale)
+      } else {
+        // Structured: cluster labels are constant-screen with a zoom-out ease:
+        // 12px on screen through the normal range, smoothly shrinking to 9px
+        // across the last stretch of zoom-out toward the minimum zoom (the
+        // fit-to-view scale — scaleExtent's floor, never a hardcoded k). Same
+        // helper as the initial render, so the two can never diverge.
+        svg.selectAll('text.cluster-label')
+          .attr('font-size', getStructuredClusterLabelFontSize(currentZoomScale, scaleExtent[0]))
+        // Focus drill-down labels follow the same constant-screen convention
+        svg.selectAll('text.structured-focus-label')
+          .attr('font-size', STRUCTURED_FOCUS.label.fontSize / currentZoomScale)
+        svg.selectAll('text.structured-focus-root-label')
+          .attr('font-size', STRUCTURED_FOCUS.label.rootFontSize / currentZoomScale)
       }
 
       // Apply zoom transform to viewport (both structured and unstructured)
@@ -1064,9 +1769,26 @@ function initializeVisualization(resetZoom = true) {
         Math.abs(event.transform.k - initial.k) < 1e-3
         && Math.abs(event.transform.x - initial.x) < 0.5
         && Math.abs(event.transform.y - initial.y) < 0.5)
+
+      // The glass discs track the nodes through zoom and pan.
+      updateNodeGlass()
     })
 
   svg.call(zoomBehaviorInstance)
+
+  // Clicking empty canvas leaves the drill-down. A pan ends in a click event
+  // too, so the pointer has to have stayed put for this to count as a click —
+  // otherwise dragging the canvas would close the focused view.
+  svg.on('pointerdown.drilldown', (event: PointerEvent) => {
+    canvasPointerDownAt = { x: event.clientX, y: event.clientY }
+  })
+  svg.on('click.drilldown', (event: MouseEvent) => {
+    if (expandedClusterIds.value.length === 0) return
+    const from = canvasPointerDownAt
+    canvasPointerDownAt = null
+    if (from && Math.hypot(event.clientX - from.x, event.clientY - from.y) > 4) return
+    exitDrilldown()
+  })
 
   // === TEMPORARY DIAGNOSTIC: INITIALIZATION STATE ===
   console.log(`[D3-INIT] Checking rendered links after initializeVisualization...`)
@@ -1112,6 +1834,11 @@ function initializeVisualization(resetZoom = true) {
   } else {
     console.log(`[D3] WARNING: resetZoom=false but currentZoomTransform is null`)
   }
+
+  // Seed the backdrop glass for the freshly rendered nodes (a cold graph never
+  // ticks, so this is the only pass that runs in Structured mode — where it
+  // clears the layer instead).
+  updateNodeGlass()
 }
 
 /**
@@ -1124,6 +1851,14 @@ function updateVisualizationForFilter(newNodes: NetworkNode[], newLinks: Network
   // Timeline filtering preserves the viewport — never let the settle-follow
   // refit fight the gentle simulation restart below.
   followInitialFit = false
+  // The visible set is about to change under the focused layer (a cluster or
+  // its entities may leave the graph entirely), so close the drill-down and
+  // restore the base opacities before re-joining. Camera is left alone —
+  // filtering preserves the viewport.
+  if (expandedClusterIds.value.length > 0) {
+    teardownDrilldown()
+    clearDrilldownEmphasis(d3.select(svgRef.value) as any)
+  }
 
   const svg = d3.select(svgRef.value)
   const newNodeIds = new Set(newNodes.map(n => n.id))
@@ -1186,7 +1921,7 @@ function updateVisualizationForFilter(newNodes: NetworkNode[], newLinks: Network
   // Add new nodes (those that became visible due to Timeline change)
   nodes.enter()
     .append('circle')
-    .attr('class', 'node-circle')
+    .attr('class', (d: any) => d.kind === 'insight' ? 'node-circle insight-node' : 'node-circle')
     .attr('cx', (d: any) => d.x || 0)
     .attr('cy', (d: any) => d.y || 0)
     // Single source of truth: same effective radius the link endpoint
@@ -1250,11 +1985,11 @@ function updateVisualizationForFilter(newNodes: NetworkNode[], newLinks: Network
   linksBackground.enter()
     .append('line')
     .attr('class', 'link-line-background')
-    .attr('stroke', 'url(#link-gradient-background)')
-    .attr('stroke-width', (d: any) => getLinkStrokeWidth(d.kind, currentZoomScale) * 1.5)
-    .attr('stroke-dasharray', (d: any) => d.kind === 'overlap' ? LINK_STYLING.strokeDasharray.overlap : LINK_STYLING.strokeDasharray.default)
-    .attr('opacity', 0.25)
-    .attr('filter', 'url(#link-background-blur)')
+    // Style from the shared connection language (linkRenderer.ts) — the same
+    // functions the Structured focus applies, so the two cannot drift apart.
+    .each(function (this: SVGLineElement, d: any) {
+      applyLinkBackgroundStyle(d3.select(this), { zoomScale: currentZoomScale, kind: d.kind })
+    })
     .attr('x1', (d: any) => {
       const sourceRadius = getNodeRadiusFromData(d.source)
       const targetRadius = getNodeRadiusFromData(d.target)
@@ -1283,10 +2018,9 @@ function updateVisualizationForFilter(newNodes: NetworkNode[], newLinks: Network
   linksForeground.enter()
     .append('line')
     .attr('class', 'link-line-foreground')
-    .attr('stroke', 'url(#link-gradient-foreground)')
-    .attr('stroke-width', (d: any) => getLinkStrokeWidth(d.kind, currentZoomScale))
-    .attr('stroke-dasharray', (d: any) => d.kind === 'overlap' ? LINK_STYLING.strokeDasharray.overlap : LINK_STYLING.strokeDasharray.default)
-    .attr('opacity', 0.9)
+    .each(function (this: SVGLineElement, d: any) {
+      applyLinkForegroundStyle(d3.select(this), { zoomScale: currentZoomScale, kind: d.kind })
+    })
     .attr('x1', (d: any) => {
       const sourceRadius = getNodeRadiusFromData(d.source)
       const targetRadius = getNodeRadiusFromData(d.target)
@@ -1315,10 +2049,9 @@ function updateVisualizationForFilter(newNodes: NetworkNode[], newLinks: Network
   linkEndpoints.enter()
     .append('circle')
     .attr('class', 'link-endpoint')
-    .attr('r', LINK_STYLING.endpoints.radius * getInverseZoomScale(currentZoomScale))
-    .attr('fill', LINK_STYLING.endpoints.fill)
-    .attr('opacity', LINK_STYLING.endpoints.opacity)
-    .attr('filter', 'url(#link-endpoint-blur)')
+    .each(function (this: SVGCircleElement) {
+      applyLinkEndpointStyle(d3.select(this), currentZoomScale)
+    })
     .attr('cx', (d: any) => {
       const sourceRadius = getNodeRadiusFromData(d.source)
       const targetRadius = getNodeRadiusFromData(d.target)
@@ -1415,7 +2148,7 @@ function updateVisualizationForFilter(newNodes: NetworkNode[], newLinks: Network
     .attr('font-style', TYPOGRAPHY.source.fontStyle)
     .attr('font-weight', TYPOGRAPHY.source.fontWeight)
     .attr('fill', chartTheme.value.ink)
-    .attr('opacity', TYPOGRAPHY.source.opacity)
+    .attr('opacity', TYPOGRAPHY.restingOpacity)
     .style('line-height', `${TYPOGRAPHY.source.lineHeight}px`)
     .style('-webkit-text-stroke-color', (TYPOGRAPHY.source as any).textStroke)
     .style('-webkit-text-stroke-width', `${(TYPOGRAPHY.source as any).textStrokeWidth}px`)
@@ -1431,7 +2164,7 @@ function updateVisualizationForFilter(newNodes: NetworkNode[], newLinks: Network
     .attr('font-style', TYPOGRAPHY.document.fontStyle)
     .attr('font-weight', TYPOGRAPHY.document.fontWeight)
     .attr('fill', chartTheme.value.ink)
-    .attr('opacity', TYPOGRAPHY.document.opacity)
+    .attr('opacity', TYPOGRAPHY.restingOpacity)
     .style('line-height', `${TYPOGRAPHY.document.lineHeight}px`)
     .style('-webkit-text-stroke-color', (TYPOGRAPHY.document as any).textStroke)
     .style('-webkit-text-stroke-width', `${(TYPOGRAPHY.document as any).textStrokeWidth}px`)
@@ -1439,7 +2172,7 @@ function updateVisualizationForFilter(newNodes: NetworkNode[], newLinks: Network
 
   // Add icons to newly visible nodes (both kinds at natural data-space size)
   const sourceIconDiameter = getSourceIconDiameter(currentZoomScale)
-  const documentIconDiameter = getIconDiameter('document')
+  const documentIconDiameter = getDocumentIconDiameter(currentZoomScale)
   svg.selectAll('image.source-icon, image.document-icon').data(visibleNodes.filter((n: any) => n.kind === 'source' || n.kind === 'document'), (d: any) => d.id)
     .exit().remove()
 
@@ -1450,10 +2183,10 @@ function updateVisualizationForFilter(newNodes: NetworkNode[], newLinks: Network
     if (existingIcon.empty()) {
       // Only add if it doesn't exist
       let iconHref: string | null = null
-      if (nodeData.kind === 'source' && SOURCE_ICONS[nodeData.id]) {
-        iconHref = SOURCE_ICONS[nodeData.id]
-      } else if (nodeData.kind === 'document' && nodeData.sourceIcon) {
-        iconHref = nodeData.sourceIcon
+      if (nodeData.kind === 'source') {
+        iconHref = getSourceNodeIcon(nodeData.id)
+      } else if (nodeData.kind === 'document') {
+        iconHref = documentNodeIconFor(nodeData.ext)
       }
 
       if (iconHref) {
@@ -1468,6 +2201,9 @@ function updateVisualizationForFilter(newNodes: NetworkNode[], newLinks: Network
           .attr('width', iconDiameter)
           .attr('height', iconDiameter)
           .attr('href', iconHref)
+          // Both hub kinds are full-bleed SQUARE tiles filling the whole
+          // circle, so both are clipped back to it.
+          .attr('clip-path', `url(#${SOURCE_ICON_CLIP_ID})`)
           .attr('opacity', SOURCE_NODES.icon.opacity)
       }
     }
@@ -1516,6 +2252,10 @@ function updateVisualizationForFilter(newNodes: NetworkNode[], newLinks: Network
       simulation.alpha(0.1).restart() // Gentle restart with low alpha to let it settle
     }
   }
+
+  // A Timeline filter can add or remove nodes without the simulation ticking
+  // (when the visible set is unchanged it never restarts), so re-clip here too.
+  updateNodeGlass()
 
   console.log(`[D3] updateVisualizationForFilter complete`)
 }
@@ -1579,6 +2319,7 @@ watch(() => [props.nodes, props.links, props.layoutMode, props.zoom], (newVal, o
 })
 
 onBeforeUnmount(() => {
+  teardownDrilldown()
   if (props.layoutMode === 'structured') {
     cleanupStructured()
   }
@@ -1597,36 +2338,351 @@ function applyZoomScale(factor: number) {
   svg.call(zoomBehaviorInstance.scaleBy, factor)
 }
 
+// ── Structured Cluster FOCUS (drill-down) ────────────────────────────────────
+// Clicking a cluster in Structured mode expands `Cluster → Insights →
+// Entities` from it, over the dimmed radial overview — see structuredFocus.ts.
+// SEVERAL clusters can be open at once: clicking a new one adds it, clicking an
+// expanded one closes just that one, and Reset closes them all. State lives here
+// because the camera (zoom behavior) does.
+let structuredFocusHandle: StructuredFocusHandle | null = null
+/**
+ * Open cluster ids in CLICK ORDER — oldest first, newest last. The order is
+ * load-bearing twice over: the LAST entry is the primary (the cluster the rotor
+ * turns to the focus side), and the FIRST is the one evicted at
+ * `STRUCTURED_FOCUS.maxOpen`.
+ */
+const structuredOpenIds: string[] = []
+/**
+ * Reactive mirror of "a Structured focus is open" — drives the viewport-edge
+ * fade mask class on the <svg> (see `--edge-fade` in the stylesheet). The
+ * mask is SCREEN-anchored, which is exactly why it is CSS on the canvas
+ * element rather than an SVG mask: everything drawable lives inside the
+ * zoom-transformed viewport group, where a mask would travel with the camera.
+ */
+const structuredFocusActive = ref(false)
+/** The fade band depth, from the focus tokens, for the CSS mask (v-bind). */
+const focusEdgeFade = `${STRUCTURED_FOCUS.edgeFadePx}px`
+
+/**
+ * Click a cluster: expand it alongside whatever is already expanded, or collapse
+ * it if it is one of them. Never collapses the others.
+ */
+function toggleStructuredFocus(clusterId: string) {
+  if (!svgRef.value || !zoomBehaviorInstance || props.layoutMode !== 'structured') return
+  const at = structuredOpenIds.indexOf(clusterId)
+  if (at >= 0) {
+    // Clicking an EXPANDED cluster closes only that one; the rest stay open.
+    structuredOpenIds.splice(at, 1)
+  } else {
+    structuredOpenIds.push(clusterId)
+    // Past the cap the OLDEST gives way, so a click always does something
+    // visible instead of being silently refused.
+    while (structuredOpenIds.length > STRUCTURED_FOCUS.maxOpen) structuredOpenIds.shift()
+  }
+  applyStructuredFocus()
+}
+
+/**
+ * Render whatever the open set currently is. One path for one cluster and for
+ * many — the focus controller diffs the set itself (keyed by cluster id), so an
+ * already-open fan is left untouched while the new one animates in.
+ */
+function applyStructuredFocus() {
+  if (!svgRef.value || !zoomBehaviorInstance) return
+  const svg = d3.select(svgRef.value)
+  const viewportG = svg.select<SVGGElement>('g.viewport')
+
+  const models = structuredOpenIds
+    .map(id => deriveStructuredFocus(viewportG as any, id))
+    .filter((m): m is StructuredFocusModel => !!m)
+  // Drop ids whose cluster is no longer rendered, so the list can never hold a
+  // stale entry that keeps the focus alive invisibly.
+  if (models.length !== structuredOpenIds.length) {
+    structuredOpenIds.length = 0
+    structuredOpenIds.push(...models.map(m => m.clusterId))
+  }
+  if (!models.length) {
+    closeStructuredFocus()
+    return
+  }
+
+  const camera = computeFocusCamera(models)
+  structuredFocusActive.value = true
+  // Suspend hover isolation: the focus owns every opacity now (its own dim
+  // transition also overwrites whatever a hover pass had applied).
+  setStructuredHoverSuspended(true)
+  structuredFocusHandle ??= createStructuredFocus(viewportG as any)
+  structuredFocusHandle.update(models, {
+    cameraK: camera.k,
+    insightFill: chartTheme.value?.categorical?.[0] || '#F2C585',
+    insightStroke: NODE_STYLING.insight.stroke,
+    // The identical expression the drill-down passes as its `entityColor`, so a
+    // focus entity mark and an `expanded-entity` dot resolve to one colour.
+    entityFill: nodeColor.value({ kind: 'entity' } as NetworkNode),
+    // Same live token resolver the drill-down's chip uses — the isolated-entity
+    // chip reads the expanded-region-chip tokens through it.
+    themeColor,
+  })
+  // Keep the min-zoom floor at whichever is lower, the focus camera or the
+  // initial fit, so the first wheel gesture never snaps.
+  zoomBehaviorInstance.scaleExtent([Math.min(camera.k, computeInitialTransform().k), VIEWPORT.zoomExtent[1]])
+  // ONE MOVE: the camera runs for the same duration as the rotor's rotation, so
+  // the graph turning into focus and the view framing it are a single motion
+  // rather than two staggered ones.
+  svg.transition().duration(STRUCTURED_FOCUS.rotationMs)
+    .call(zoomBehaviorInstance.transform as any, camera)
+}
+
+/** Close EVERY open cluster and restore the radial overview. */
+function closeStructuredFocus(animateCamera = true) {
+  if (!structuredOpenIds.length && !structuredFocusHandle) return
+  structuredOpenIds.length = 0
+  structuredFocusActive.value = false
+  structuredFocusHandle?.destroy(true)
+  structuredFocusHandle = null
+  setStructuredHoverSuspended(false)
+  if (!svgRef.value || !zoomBehaviorInstance) return
+  const initial = computeInitialTransform()
+  zoomBehaviorInstance.scaleExtent([initial.k, VIEWPORT.zoomExtent[1]])
+  if (animateCamera) {
+    // Same single-motion pairing on the way out: the camera unwinds over the
+    // rotation's duration, alongside the rotor returning to 0.
+    d3.select(svgRef.value).transition().duration(STRUCTURED_FOCUS.rotationMs)
+      .call(zoomBehaviorInstance.transform as any, initial)
+  }
+}
+
+/** Any structured re-render rebuilds the SVG — discard stale focus state. */
+function resetStructuredFocusState() {
+  structuredFocusHandle = null
+  structuredOpenIds.length = 0
+  structuredFocusActive.value = false
+  setStructuredHoverSuspended(false)
+}
+
 /**
  * Reset the camera to the exact initial-entry framing: the same fit-to-view
  * transform (scale + centered translate) computeInitialTransform() produces on
  * first load. Viewport-only: does not touch the simulation, node positions, or data.
  */
+/**
+ * Fly the camera to a set of nodes and nothing else.
+ *
+ * Bounds come from the nodes' own effective radii at zoom 1 (the same
+ * measurement the initial fit uses, so the two cameras agree), padded by
+ * `VIEWPORT.sourceFocus.padding`. The scale is capped: fitting two nodes
+ * exactly would otherwise magnify them to fill the canvas.
+ */
+function fitCameraToNodes(focusNodes: any[]) {
+  if (!svgRef.value || !zoomBehaviorInstance || !focusNodes.length) return
+  let minX = Infinity
+  let minY = Infinity
+  let maxX = -Infinity
+  let maxY = -Infinity
+  for (const n of focusNodes) {
+    if (typeof n.x !== 'number' || typeof n.y !== 'number') continue
+    const r = getEffectiveNodeRadius(n, 1)
+    minX = Math.min(minX, n.x - r)
+    minY = Math.min(minY, n.y - r)
+    maxX = Math.max(maxX, n.x + r)
+    maxY = Math.max(maxY, n.y + r)
+  }
+  if (!Number.isFinite(minX)) return
+
+  const pad = VIEWPORT.sourceFocus.padding
+  const width = (maxX - minX) + pad * 2
+  const height = (maxY - minY) + pad * 2
+  const k = Math.min(
+    Math.min(VIEWPORT.dataWidth / width, VIEWPORT.dataHeight / height),
+    VIEWPORT.sourceFocus.maxScale,
+    VIEWPORT.zoomExtent[1],
+  )
+  const cx = (minX + maxX) / 2
+  const cy = (minY + maxY) / 2
+  const transform = d3.zoomIdentity
+    .translate(VIEWPORT.dataWidth / 2 - k * cx, VIEWPORT.dataHeight / 2 - k * cy)
+    .scale(k)
+
+  // The camera is now the user's, not the settling simulation's.
+  followInitialFit = false
+  d3.select(svgRef.value)
+    .transition()
+    .duration(VIEWPORT.sourceFocus.durationMs)
+    .call(zoomBehaviorInstance.transform as any, transform)
+}
+
 function resetView() {
   if (!svgRef.value || !zoomBehaviorInstance) return
+  // Reset while the Structured focus is open = close it (which restores the
+  // dimmed overview AND animates the camera back to the initial framing).
+  if (props.layoutMode === 'structured' && structuredOpenIds.length) {
+    closeStructuredFocus()
+    return
+  }
   followInitialFit = false
   const svg = d3.select(svgRef.value)
   svg.call(zoomBehaviorInstance.transform, computeInitialTransform())
 }
 
+/**
+ * Focus a node from OUTSIDE the canvas — used by the assistant's inline
+ * references, so a name in the prose lands on the same view clicking that node
+ * would. Deliberately routes through the canvas's existing behaviours rather
+ * than adding a second navigation model:
+ *
+ *   cluster          → its drill-down opens (expandCluster)
+ *   source/document  → the hub and the clusters bound to it are framed, exactly
+ *                      as a click on the hub does
+ *   anything else    → centred on its own
+ *
+ * Returns false when the id is not on the canvas, so the caller can tell a
+ * missing destination from a completed navigation.
+ */
+function focusNode(nodeId: string): boolean {
+  const nodes = layoutNodes.value as any[]
+  const node = nodes.find(n => n.id === nodeId)
+  if (!node) return false
+
+  if (node.kind === 'cluster') {
+    if (!expandedClusterIds.value.includes(nodeId)) expandCluster(nodeId)
+    return true
+  }
+
+  if (node.kind === 'source' || node.kind === 'document') {
+    const endpointId = (e: any) => (typeof e === 'string' ? e : e?.id)
+    const group = new Map<string, any>([[node.id, node]])
+    for (const link of props.links as any[]) {
+      const s = endpointId(link.source)
+      const t = endpointId(link.target)
+      if (s !== nodeId && t !== nodeId) continue
+      const other = nodes.find(n => n.id === (s === nodeId ? t : s))
+      if (other?.kind === 'cluster') group.set(other.id, other)
+    }
+    fitCameraToNodes([...group.values()])
+    return true
+  }
+
+  fitCameraToNodes([node])
+  return true
+}
+
 defineExpose({
   applyZoomScale,
   resetView,
+  focusNode,
 })
 </script>
 
 <template>
   <div ref="container" class="network-graph-d3">
-    <svg ref="svg" class="network-graph-d3__canvas" />
+    <!--
+      NODE BACKDROP GLASS. One element, clipped to the union of every
+      `.node-circle`, carrying a real `backdrop-filter` — see NODE_GLASS in
+      graphTokens.ts for why this is a CSS layer and not an SVG filter
+      (measured: `backdrop-filter` is inert on SVG shapes, and an SVG filter
+      would have nothing to blur). It sits BETWEEN the container's dot grid and
+      the <svg>, so it softens the background showing through a node's
+      semi-transparent fill while the node, its stroke, glow, icon and label —
+      all drawn in the <svg> above — stay perfectly sharp.
+
+      Decorative and inert: aria-hidden, no pointer events.
+    -->
+    <div ref="glass" class="network-graph-d3__glass" aria-hidden="true" />
+    <!--
+      EXPANDED-REGION BACKDROP GLASS — same construction as the node glass
+      above, but clipped to the drill-down's expanded-region circles and
+      carrying its own (stronger) blur from EXPANDED_CLUSTER.region.glass.
+      The SVG half of the treatment (a blurred purple backing disc) lives in
+      useDrilldownRenderer; this layer blurs the page background the SVG
+      cannot reach.
+    -->
+    <div ref="regionGlass" class="network-graph-d3__region-glass" aria-hidden="true" />
+    <svg
+      ref="svg"
+      class="network-graph-d3__canvas"
+      :class="{ 'network-graph-d3__canvas--edge-fade': structuredFocusActive }"
+    />
   </div>
 </template>
 
 <style scoped>
+/*
+ * The container carries the dot grid so the tile is measured in screen pixels
+ * and stays the same size at every viewport width. Drawing it inside the <svg>
+ * (as an SVG <pattern>) tied it to the viewBox scale, which is why the dots
+ * grew on larger screens. Values come from BACKGROUND_PATTERN in graphTokens.ts.
+ */
 .network-graph-d3 {
   width: 100%;
   height: 100%;
   position: relative;
   overflow: hidden;
+  /*
+   * The dots are painted in the `background` theme token, read live from
+   * Vuetify so a theme swap takes them with it — only the alpha comes from
+   * graphTokens. The container itself stays transparent: the host screen's
+   * canvas gradient is the ground, and this grid is a darker grain over it.
+   */
+  background-image: radial-gradient(
+    circle at 50% 50%,
+    rgba(var(--v-theme-background), v-bind(dotAlpha)) v-bind(dotStop),
+    transparent v-bind(dotFade)
+  );
+  background-size: v-bind(dotTile) v-bind(dotTile);
+  /*
+   * REQUIRED. Vuetify's reset declares `background-repeat: no-repeat` on
+   * `*, ::before, ::after`, so a tiled background that does not restate this
+   * paints exactly ONE tile in the top-left corner and looks like nothing at
+   * all. This is why the grid appeared to vanish when it moved from an SVG
+   * <pattern> to CSS — the pattern was fine; only its first tile was drawn.
+   */
+  background-repeat: repeat;
+}
+
+/*
+ * The frosted disc behind every node. `z-index` is what makes the layering
+ * work: the glass is positioned (so it paints above the container's dot-grid
+ * background) while the canvas below is given `z-index: 1`, so the <svg> — and
+ * therefore every node, stroke, glow, icon and label — paints ON TOP of it and
+ * is never itself blurred.
+ *
+ * `clip-path` is written per frame by updateNodeGlass() as one `path()` holding
+ * one sub-circle per rendered node, in screen px. Blur radius comes from
+ * NODE_GLASS.blurPx via v-bind, and `backdrop-filter` works in screen pixels,
+ * so it stays a constant 2px at every zoom level with no compensation.
+ */
+.network-graph-d3__glass {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  /*
+   * ⚠️ The blur itself is NOT declared here. Written as a v-bind()'d pair
+   * (`backdrop-filter` + `-webkit-backdrop-filter`, both `blur(var(--x))`),
+   * the production CSS minifier collapsed the two into the `-webkit-` one
+   * only — which Chrome does not support, so the effect computed to `none` in
+   * `pnpm build` while working in `pnpm dev`. Static pairs elsewhere in the app
+   * survive; the `var()` value is what defeats the dedupe. updateNodeGlass()
+   * therefore sets both properties inline, past the minifier, still from
+   * NODE_GLASS.blurPx.
+   *
+   * Hidden until updateNodeGlass() has real circles to clip to. It must NOT
+   * start visible-but-unclipped: that would blur the whole canvas for a frame
+   * before the first clip lands. (`clip-path: path('')` cannot be used for
+   * this — it is invalid CSS and is dropped; see the note in updateNodeGlass.)
+   */
+  display: none;
+}
+
+/* The expanded regions' backdrop glass — same contract as the node glass
+   above: positioned between the dot grid and the <svg>, clip + filter written
+   inline by updateNodeGlass(), hidden whenever there is nothing to clip to. */
+.network-graph-d3__region-glass {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  display: none;
 }
 
 .network-graph-d3__canvas {
@@ -1635,6 +2691,45 @@ defineExpose({
   background: transparent;
   pointer-events: auto;
   cursor: grab;
+  /* Paints above the glass layer — see the note there. */
+  position: relative;
+  z-index: 1;
+}
+
+/*
+ * STRUCTURED FOCUS — VIEWPORT-EDGE FADE.
+ * While a cluster is focused, the composition (region circle, entities,
+ * labels, its lines — everything the canvas draws) dissolves softly as it
+ * approaches the TOP, BOTTOM and LEFT screen edges instead of ending
+ * abruptly; the safe centre band stays fully opaque and the RIGHT edge is
+ * deliberately unfaded. Screen-anchored on purpose: two composited CSS mask
+ * gradients on the <svg> itself (a left ramp ∩ a top/bottom ramp), because
+ * every drawable lives inside the zoom-transformed viewport group where an
+ * SVG mask would travel with the camera instead of staying on the viewport
+ * edge. Purely a rendering-layer effect — no data or layout involvement.
+ * The band depth comes from STRUCTURED_FOCUS.edgeFadePx via v-bind.
+ */
+.network-graph-d3__canvas--edge-fade {
+  -webkit-mask-image:
+    linear-gradient(to right, transparent 0, #000 v-bind(focusEdgeFade)),
+    linear-gradient(
+      to bottom,
+      transparent 0,
+      #000 v-bind(focusEdgeFade),
+      #000 calc(100% - v-bind(focusEdgeFade)),
+      transparent 100%
+    );
+  -webkit-mask-composite: source-in;
+  mask-image:
+    linear-gradient(to right, transparent 0, #000 v-bind(focusEdgeFade)),
+    linear-gradient(
+      to bottom,
+      transparent 0,
+      #000 v-bind(focusEdgeFade),
+      #000 calc(100% - v-bind(focusEdgeFade)),
+      transparent 100%
+    );
+  mask-composite: intersect;
 }
 
 .network-graph-d3__canvas:active {
@@ -1646,21 +2741,76 @@ defineExpose({
   cursor: pointer;
 }
 
+/*
+ * Subtle black outline behind the document + expanded-entity labels so they
+ * stay readable over busy canvas regions. These are SVG <text> elements, so
+ * the CSS `-webkit-text-stroke` property is inert here — the SVG equivalent
+ * is a 1px stroke painted BEHIND the fill (`paint-order: stroke`), which
+ * leaves the glyphs' color, apparent weight, size and positioning untouched.
+ * Color: Black/80%. No matching theme token exists yet (the theme only
+ * defines the Black/B family at 40%), so per the DS convention this reads
+ * the token-shaped custom property first and falls back to the literal —
+ * defining --black-b-80 later restyles these without touching this rule.
+ */
+:deep(text.document-label),
+:deep(text.expanded-entity-label) {
+  stroke: var(--black-b-80, rgba(0, 1, 1, 0.8));
+  stroke-width: 1px;
+  paint-order: stroke fill;
+}
+
 :deep(line) {
   transition: stroke-width 0.2s ease, opacity 0.2s ease;
 }
 
-:deep(circle.node-circle:hover) {
-  filter: brightness(1.2);
-  box-shadow: 0 0 8px rgba(255, 255, 255, 0.3);
+/*
+ * Hover emphasis for the ordinary node kinds. `filter` here is the CSS
+ * property, which OVERRIDES the SVG `filter` attribute (they are the same
+ * channel), so Insights are excluded — they own their glow through that
+ * attribute and get their own rules below. The old rule in this slot also
+ * carried a `box-shadow`, which does nothing at all on an SVG shape.
+ */
+/*
+ * The glow fades in/out. `filter` interpolates from `none` because the spec
+ * treats the missing side as the identity for each function in the list, so
+ * the resting state needs no filter of its own — which matters here: a
+ * permanent filter on ~90 circles would force a compositing layer for every
+ * node on every simulation tick.
+ */
+:deep(circle.node-circle:not(.insight-node)) {
+  transition: filter v-bind(nodeHoverTransition);
 }
 
-:deep(circle[filter="url(#insight-shadow)"]) {
-  transition: filter 0.2s ease;
+/*
+ * `.is-expanded-region` is stamped on the base circle of a cluster that is
+ * currently drawn as an expanded REGION (see the drill-down renderer). Such a
+ * circle is already invisible and pointer-events:none, so it cannot be
+ * hovered — the class makes the exclusion explicit rather than incidental.
+ * `.expanded-entity` dots and `.expanded-region-circle` are different classes
+ * entirely, so neither is matched by these rules.
+ */
+:deep(circle.node-circle:not(.insight-node):not(.is-expanded-region):hover),
+:deep(circle.node-circle:not(.insight-node):not(.is-expanded-region):focus-visible) {
+  filter: v-bind(nodeHoverFilter);
 }
 
-:deep(circle[filter="url(#insight-shadow)"]:hover) {
-  filter: drop-shadow(0 0 8px #7C6749) !important;
+/*
+ * INSIGHT hover: brighter fill + a stronger, warm-white glow, swapping the
+ * SVG filter (see the `insight-shadow-hover` def). Fill and stroke transition
+ * smoothly; the glow swap is a discrete step because CSS cannot interpolate
+ * between two `url()` filters. The stroke deliberately keeps its accent
+ * colour so the edge stays crisp rather than blowing out with the glow.
+ *
+ * Values come from NODE_STYLING.insight via v-bind(), so the tokens remain
+ * the single source of truth for both states.
+ */
+:deep(circle.insight-node) {
+  transition: fill v-bind(insightHoverTransition), stroke v-bind(insightHoverTransition);
+}
+
+:deep(circle.insight-node:hover) {
+  fill: v-bind(insightHoverFill);
+  filter: url(#insight-shadow-hover);
 }
 
 :deep(text.source-label) {
@@ -1671,5 +2821,64 @@ defineExpose({
 :deep(line:hover) {
   opacity: 0.9 !important;
   stroke-width: 2 !important;
+}
+
+/*
+ * CLUSTER DRILL-DOWN LAYER
+ * The focused layer fades in rather than popping, so the expansion reads as the
+ * clicked cluster growing out of the graph. Geometry and colour live in
+ * expandedTokens.ts — only motion and cursor affordances are here.
+ */
+:deep(g.expanded-layer) {
+  animation: expanded-layer-in 220ms ease-out;
+}
+
+@keyframes expanded-layer-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* Entity points/labels: opacity is driven by hover isolation, so give them the
+   same easing the base circles use and keep labels out of hit-testing. */
+:deep(circle.expanded-entity) {
+  transition: opacity 0.15s ease, r 0.15s ease;
+}
+
+:deep(text.expanded-entity-label) {
+  pointer-events: none;
+  transition: opacity 0.15s ease;
+  letter-spacing: 0.2px;
+}
+
+/* All drill-down connections are straight single-segment <line>s (project
+   graph-geometry rule) — these rules only ease their opacity, never shape. */
+:deep(line.expanded-entity-relation),
+:deep(line.expanded-routed) {
+  transition: stroke-opacity 0.15s ease;
+  pointer-events: none;
+}
+
+:deep(g.expanded-region-chip) {
+  user-select: none;
+}
+
+/* The chip's × (Carbon close glyph): its own hover/focus states, independent
+   of the chip body. Opacity values mirror expandedTokens.chip.close. */
+:deep(g.expanded-chip-close .expanded-chip-close-glyph) {
+  transition: opacity 0.15s ease;
+}
+
+:deep(g.expanded-chip-close:hover .expanded-chip-close-glyph),
+:deep(g.expanded-chip-close:focus-visible .expanded-chip-close-glyph) {
+  opacity: 1 !important;
+}
+
+:deep(g.expanded-chip-close:focus-visible) {
+  outline: none;
+}
+
+:deep(g.expanded-chip-close:focus-visible .expanded-chip-close-hit) {
+  fill: rgba(255, 255, 255, 0.12);
+  rx: 3px;
 }
 </style>

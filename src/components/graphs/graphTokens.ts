@@ -16,15 +16,34 @@
 // NODE SIZING RULES
 // ============================================================================
 // Each node type has specific sizing behavior:
-// - Source: Fixed size (40px)
+// - Source: Fixed size (12px) — ALWAYS the smallest node kind
 // - Entity: Fixed size (20px)
 // - Cluster: Variable size (scales with entity count)
 // - Insight: Variable size (based on confidence/signals)
-// - Document: Fixed size (40px, same as source)
+// - Document: Fixed size (12px, same as source)
+//
+// ── SIZE HIERARCHY (enforced at every zoom level) ──
+//
+//   Source (12) < Cluster (14 → 20) < Insight (24 → 50)
+//
+// The load-bearing rule is  max(Cluster) < min(Insight)  — 20 < 24 — so the
+// LARGEST cluster is still smaller than the SMALLEST insight. Previously the
+// cluster ceiling was 60, which meant a well-populated cluster outgrew every
+// insight and inverted the hierarchy; the ceiling is now the binding constraint
+// on cluster growth, with entity-count/weight scaling living inside it.
+//
+// Why this holds at EVERY zoom, with no maximum screen clamp (which would fight
+// zoom-aware sizing by freezing clusters as you zoom in):
+//   • k ≥ 1   — cluster ≤ 10r, insight ≥ 12r.                         ✓
+//   • k < 1   — the per-kind minimum SCREEN clamps take over, and they are
+//               ordered the same way (12 / 14 / 24), so cluster ≤ max(10, 7/k)
+//               and insight ≥ max(12, 12/k) stay ordered for every k.  ✓
+// Both kinds scale with k identically, so the data-space ordering is preserved
+// rather than re-derived per zoom level.
 
 export const NODE_DIAMETERS = {
-  // Inner ring: Sources (FIXED SIZE)
-  source: 30, // Container diameter for sources (icon + border)
+  // Inner ring: Sources (FIXED SIZE — the smallest node kind by design)
+  source: 12, // Container diameter for sources (icon + border)
 
   // Middle ring: Entity Clusters (VARIABLE SIZE - use getClusterDiameter())
   // Clusters are semantic containers whose size scales with entity count
@@ -35,7 +54,7 @@ export const NODE_DIAMETERS = {
   insight: 35, // Base insight diameter (DEPRECATED: use getInsightDiameter())
 
   // Support nodes
-  document: 30, // Same as source - unified component (FIXED SIZE)
+  document: 12, // Same as source - unified component (FIXED SIZE)
 }
 
 // ============================================================================
@@ -46,9 +65,30 @@ export const NODE_DIAMETERS = {
 // Actual radius is computed from cluster contents (entityCount or weight property).
 
 export const CLUSTER_SIZING = {
-  // TOKENS ONLY: Min and max radius (not diameter)
-  minRadius: 10, // Minimum radius for small/weak clusters
-  maxRadius: 30, // Maximum radius for large/strong clusters
+  /*
+   * The cluster's size WINDOW, written as diameters because that is what the
+   * hierarchy rule is stated in:
+   *
+   *   minDiameter 14  — one step above the 12px source, so even the weakest
+   *                     cluster is strictly larger than a source;
+   *   maxDiameter 20  — strictly BELOW INSIGHT_SIZING.minDiameter (24), which
+   *                     is the whole point: no cluster, however many entities
+   *                     it holds, can reach the smallest insight.
+   *
+   * Entity-count/weight scaling still drives the size — it just happens inside
+   * this window (see getClusterRadius), so a heavier cluster still reads as
+   * heavier, just never as an insight.
+   */
+  minDiameter: 14,
+  maxDiameter: 20,
+  // Radii are DERIVED, so the window above is the only place to edit.
+  minRadius: 14 / 2,
+  maxRadius: 20 / 2,
+  // Minimum ON-SCREEN diameter: like SOURCE_NODES.minDiameter, but one step
+  // larger, so zooming out never renders a cluster smaller than a source.
+  // Deliberately NO maximum screen clamp — that would stop clusters growing as
+  // you zoom in. The ordering is held by the data-space ceiling instead.
+  minScreenDiameter: 14,
   padding: 2, // Padding between cluster edge and contained entities
 
   // Clusters can have either:
@@ -94,9 +134,17 @@ export function getClusterDiameter(entityCountOrWeight: number, isWeight: boolea
 // Insights are variable size nodes: size represents strength of signal
 
 export const INSIGHT_SIZING = {
-  // Minimum and maximum insight diameter
-  minDiameter: 20, // Minimum size for weak insights
+  /*
+   * The insight's size window. `minDiameter` is the top of the hierarchy ladder
+   * and must stay STRICTLY GREATER than CLUSTER_SIZING.maxDiameter (20) — that
+   * single inequality is what makes an insight always readable as the largest
+   * kind, whatever its confidence and however many entities a cluster holds.
+   */
+  minDiameter: 24, // Minimum size for weak insights — must exceed cluster max
   maxDiameter: 50, // Maximum size for strong insights
+  // Minimum ON-SCREEN diameter — the top step of the per-kind clamp ladder
+  // (source 12 < cluster 14 < insight 24), holding the hierarchy at low zoom.
+  minScreenDiameter: 24,
 
   // Size can be driven by:
   // 1. Explicit `size` property in node data (e.g., 5-14 range)
@@ -112,7 +160,7 @@ export const INSIGHT_SIZING = {
  */
 export function getInsightDiameter(sizeValue: number): number {
   // Map size value (1-14) to diameter range (20-50px)
-  // sizeValue=1 → ~20px, sizeValue=14 → ~50px
+  // sizeValue=1 → ~24px, sizeValue=14 → ~50px
   const minSize = 1
   const maxSize = 14
   const clamped = Math.max(minSize, Math.min(sizeValue, maxSize))
@@ -142,25 +190,37 @@ export function getNodeRadius(diameter: number): number {
 // ICON SIZING - Source and Document nodes
 // ============================================================================
 // Icons displayed within source/document nodes.
-// Source icon fits closely inside its node circle: icon + 2 × padding = node
-// diameter, keeping a small safe gap so the icon never touches the stroke.
-// Document icon stays ABSOLUTE (20px), never calculated from node radius.
+// BOTH hub icon kinds derive from their (min-screen-clamped) node circle so
+// they scale naturally with zoom and never render tiny. BOTH kinds are
+// full-bleed tiles that fill their circle EDGE TO EDGE (30/30) and are clipped
+// round — see getSourceIconDiameter / getDocumentIconDiameter.
 
-// Safe gap between the source icon and the circle boundary, per side
-export const SOURCE_ICON_PADDING = 2
+/**
+ * Inner gap between the source icon and the circle boundary, per side.
+ *
+ * ZERO by design: the source assets are full-bleed brand tiles, so the image
+ * fills the node EDGE TO EDGE (icon diameter = node diameter) and the circle
+ * is clipped round around it — see the source-icon clipPath in
+ * NetworkGraphD3.vue. Raising this re-introduces a visible ring of canvas
+ * between the logo and the node edge.
+ */
+export const SOURCE_ICON_PADDING = 0
 
 export const ICON_CONFIG = {
   source: {
-    // Derived from the node circle: 30px diameter − 2 × 2px padding = 26px
+    // The FULL node circle: 30px diameter − 2 × 0px padding = 30px, so the
+    // logo tile reaches the node edge with no inner padding.
     iconSize: NODE_DIAMETERS.source - SOURCE_ICON_PADDING * 2, // px at 1.0 zoom
     opacity: 0.95,
   },
 
   document: {
-    // ABSOLUTE icon size: 20px (occupies 50% of 40px container)
-    // Same as source - unified component styling
-    // Container: 40px diameter → Icon: 20px
-    iconSize: 20, // px at 1.0 zoom
+    // The FULL node circle, like the source tiles: the document asset
+    // (`Document Logo.svg`) is a full-bleed tile too, so it fills the node
+    // edge to edge with zero inner padding and is clipped round. The rendered
+    // size still derives from the clamped hub circle via
+    // getDocumentIconDiameter, so the minimum on-screen size is unchanged.
+    iconSize: NODE_DIAMETERS.document, // px at 1.0 zoom (0 inner padding)
     opacity: 0.95,
   },
 }
@@ -210,10 +270,106 @@ export const LAYOUT_RINGS = {
 // ============================================================================
 // Visual properties for each node type
 
+/**
+ * Mix a hex colour toward another by `amount` (0–1). Used to DERIVE hover
+ * variants from the design system's accent tokens rather than inventing new
+ * hexes: the base accents stay the single source of truth, and a rebrand moves
+ * the hover states with them automatically.
+ */
+export function mixHex(from: string, to: string, amount: number): string {
+  const parse = (hex: string) => {
+    const h = hex.replace('#', '')
+    const full = h.length === 3 ? h.split('').map(c => c + c).join('') : h
+    const n = parseInt(full, 16)
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255]
+  }
+  const a = parse(from)
+  const b = parse(to)
+  const k = Math.max(0, Math.min(1, amount))
+  const ch = (i: number) => Math.round(a[i] + (b[i] - a[i]) * k)
+  return `#${[ch(0), ch(1), ch(2)].map(v => v.toString(16).padStart(2, '0')).join('')}`
+}
+
+/** Yellow/Accent 1 + 2 — mirrored from vuetify.ts (see NODE_STYLING.insight). */
+const YELLOW_ACCENT_1 = '#F2C585'
+const YELLOW_ACCENT_2 = '#7C6749'
+
+/**
+ * HOVER on a normal (collapsed) node in the Unstructured graph: the existing
+ * brightness lift plus a soft white glow.
+ *
+ * Colour comes from the design system's white token — `button-white-100`, read
+ * live as a theme triplet so a rebrand carries it — at the spec'd 0.35 alpha.
+ * (The white ramp has 5/10/20/60/80/100 steps but no 35, so the alpha is
+ * applied to the token rather than inventing a new colour.)
+ *
+ * Applied as a CSS `filter` (verified to render on these SVG circles, unlike
+ * `box-shadow`), chained after the brightness so both effects survive. Insight
+ * nodes are EXCLUDED: they already own a warm-white hover glow through their
+ * own SVG filter (NODE_STYLING.insight.hover), and a second white glow would
+ * fight it on the same property.
+ */
+/**
+ * The luminous paint server every connection in the app is stroked with.
+ *
+ * Declared here (id + stops) rather than inline in one renderer because BOTH
+ * graph modes need the same paint: the Unstructured graph builds it in its
+ * <defs>, and the Structured renderer — which clears the SVG and builds its
+ * own — creates the identical def from this token, so an expanded-entity
+ * relation and a Structured connection are literally the same stroke instead
+ * of two hand-matched approximations.
+ */
+export const LINK_GRADIENT = {
+  foreground: {
+    id: 'link-gradient-foreground',
+    stops: [
+      { offset: '0%', color: '#FFFFFF', opacity: 0.2 },
+      { offset: '40%', color: '#FFFFFF', opacity: 0.8 },
+      { offset: '60%', color: '#FFFFFF', opacity: 0.8 },
+      { offset: '100%', color: '#FFFFFF', opacity: 0.2 },
+    ],
+  },
+  background: {
+    id: 'link-gradient-background',
+    stops: [
+      { offset: '0%', color: '#949B99', opacity: 0.2 },
+      { offset: '48%', color: '#949B99', opacity: 0.08 },
+      { offset: '99%', color: '#949B99', opacity: 0.2 },
+    ],
+  },
+}
+
+export const NODE_HOVER = {
+  /** Existing lift — kept so hover behaviour is added to, not replaced. */
+  brightness: 1.2,
+  glow: {
+    blur: 6, // px, CSS drop-shadow blur radius
+    color: 'rgba(var(--v-theme-button-white-100), 0.35)',
+  },
+  /** Fade the glow in/out rather than snapping it. */
+  transition: '0.18s ease',
+}
+
 export const NODE_STYLING = {
   source: {
-    fill: 'rgba(157, 126, 234, 0.1)',
-    stroke: 'rgba(255, 255, 255, 0.4)',
+    /*
+     * TRANSPARENT, not `none`: a source's surface IS its full-bleed logo tile
+     * (SOURCE_ICON_PADDING = 0, clipped round), so the circle must add no
+     * colour of its own — the old translucent purple sat ON TOP of the image
+     * and tinted every brand colour.
+     *
+     * It must be `transparent` rather than `none` because SVG hit-testing is
+     * `visiblePainted`: with `fill: none` the interior is UNPAINTED, so the
+     * circle only received pointer events on its 1px stroke ring — hover and
+     * drag both went dead in the middle of every Source. A transparent paint
+     * is still a paint, so the whole disc stays interactive while showing the
+     * logo untouched. (The icon image itself is pointer-events: none, so it
+     * never intercepts.)
+     */
+    fill: 'transparent',
+    // Subtle neutral ring: theme gray1 (#949B99) at 0.45, mirrored as a
+    // literal (D3 writes SVG attrs, where var() does not substitute).
+    stroke: 'rgba(148, 155, 153, 0.45)',
     strokeWidth: 1, // CONSTANT: always 1px, never scales with zoom
     strokeDasharray: 'none',
   },
@@ -233,15 +389,94 @@ export const NODE_STYLING = {
   },
 
   insight: {
-    fill: 'theme',
-    stroke: '#7C6749',
-    strokeWidth: 2, // CONSTANT: always 2px, never scales with zoom
+    /*
+     * EXPLICIT, not 'theme'. Per DESIGNER_HANDOFF this block is the single
+     * source of truth for Insight colours in BOTH views, so the fill is named
+     * here rather than borrowed from chartTheme.categorical[0] (same value
+     * today, but that palette's ORDER is load-bearing for charts and may be
+     * re-tuned — an Insight must not change colour when it is).
+     *
+     * Both values are the design system's yellow accents, mirrored from
+     * vuetify.ts: fill = Yellow/Accent 1 (`button-outlined-accent-1`),
+     * stroke = Yellow/Accent 2 (`button-outlined-accent-2`). D3 writes SVG
+     * presentation attributes, which cannot resolve a CSS var(), so the hex
+     * lives here — keep the two in sync on a rebrand.
+     */
+    fill: YELLOW_ACCENT_1,
+    stroke: YELLOW_ACCENT_2,
+    /**
+     * Target border thickness (rendered px at zoom 1). Unlike the other node
+     * kinds this is NOT plain inverse-zoom compensated — see `strokeScreen`.
+     */
+    strokeWidth: 2,
+    /**
+     * RENDERED-THICKNESS CLAMP (see getNodeStrokeWidth).
+     *
+     * Plain inverse-zoom compensation pinned the border to a constant
+     * on-screen width, which reads too thin once the node itself is large:
+     * the ring stops keeping up with the circle it outlines. Instead the
+     * stroke scales WITH the node (constant in data space) and is then
+     * clamped in rendered space:
+     *
+     *   rendered = clamp(strokeWidth × zoomScale, min, max)
+     *   attribute = rendered / zoomScale
+     *
+     * so it can never render thinner than `min` however far the canvas is
+     * zoomed out, and thickens with the node only up to `max`.
+     */
+    strokeScreen: { min: 2, max: 3 },
     strokeDasharray: 'none',
+    /**
+     * HOVER: a brighter node and a stronger, near-white glow — both DERIVED
+     * from the accent tokens (mixHex), never new hand-picked hexes.
+     * `fill` lifts a little toward white so the node reads brighter while
+     * staying clearly yellow; the glow shifts warm-white and widens, which is
+     * what makes a hovered Insight pop without washing out its border (the
+     * stroke deliberately stays the accent colour, so the edge stays crisp).
+     */
+    hover: {
+      fill: mixHex(YELLOW_ACCENT_1, '#FFFFFF', 0.35),
+      glow: {
+        blur: 12, // px, CSS drop-shadow blur radius (2× the resting glow)
+        color: mixHex(YELLOW_ACCENT_1, '#FFFFFF', 0.55), // warm white
+        opacity: 1,
+        regionMargin: 1, // wider blur needs a wider filter region
+      },
+      /** Fill/stroke transition for the normal ⇄ hover swap. */
+      transition: '0.18s ease',
+    },
+    /**
+     * The warm glow around an Insight, drawn as an SVG <filter> (feDropShadow)
+     * because a CSS `filter` on a D3-managed SVG shape is fragile — see the
+     * `insight-shadow` def in NetworkGraphD3.vue.
+     *
+     * `blur` is the CSS drop-shadow blur RADIUS, so the filter halves it for
+     * feDropShadow's stdDeviation (CSS blur = 2 × stdDeviation) and the pair
+     * stays readable against the design spec:
+     *   drop-shadow(0 0 6px #7C6749)
+     */
+    glow: {
+      blur: 6, // px, CSS drop-shadow blur radius
+      color: YELLOW_ACCENT_2,
+      opacity: 1,
+      /**
+       * Filter REGION, as a share of the shape's bounding box. The default
+       * SVG region (−10% … 120%) is only ~2px of margin on a 20px insight,
+       * which CLIPPED the glow to a hard square and made it read as "the
+       * drop-shadow is being ignored". Generous margins cost nothing here
+       * (there are ~12 insights) and let the full blur render.
+       */
+      regionMargin: 0.75, // → x/y = −75%, width/height = 250%
+    },
   },
 
   document: {
-    fill: 'rgba(157, 126, 234, 0.1)',
-    stroke: 'rgba(255, 255, 255, 0.4)',
+    // TRANSPARENT like `source`: a document hub's surface is its dark tile
+    // (sourceNodeIcons.documentNodeIconFor) — the circle only carries the
+    // stroke and pointer events, and must never cover the tile.
+    fill: 'transparent',
+    // Same neutral gray1-mirror ring as source hubs.
+    stroke: 'rgba(148, 155, 153, 0.45)',
     strokeWidth: 1, // CONSTANT: always 1px, never scales with zoom
     strokeDasharray: 'none',
   },
@@ -256,6 +491,19 @@ export const NODE_STYLING = {
 // Renderer must NEVER derive font size from node radius or node size.
 
 export const TYPOGRAPHY = {
+  /*
+   * RESTING label opacity in the default (collapsed) Unstructured view: hidden.
+   *
+   * A graph at rest is a shape — nodes, groups and the lines between them. Every
+   * hub carrying its id as text turned that shape into a wall of words, so
+   * labels are now REVEALED rather than dimmed: nothing at rest, full
+   * `source.opacity` / `document.opacity` for the hovered node and its
+   * neighbours (see applyLabelSelection). The text stays in the DOM with its
+   * data intact, so nothing about the node set, hit-testing or the expanded
+   * view changes — only whether the glyphs paint.
+   */
+  restingOpacity: 0,
+
   source: {
     position: 'right', // Always positioned to the right of node circle
     fontFamily: 'Google Sans Flex',
@@ -428,9 +676,90 @@ export const CONSTANT_SCREEN_SIZE = {
 // CRITICAL: Clusters belong to Sources. Cluster-Source links must be strong.
 
 export const FORCE_SIMULATION = {
-  // Node charge (repulsion): negative = repels
-  chargeStrength: -150, // Reduced for tighter layout
-  chargeDistanceMax: 500,
+  // Node charge (repulsion): negative = repels.
+  // Tuned for a COHESIVE graph: softer charge and a much shorter range so
+  // separated hub groups stop repelling each other across the canvas —
+  // local spacing still comes from charge + collision at close range.
+  chargeStrength: -130,
+  chargeDistanceMax: 380, // was 500: long-range repulsion made isolated islands
+
+  // Gentle global gravity toward the canvas center (forceX/forceY): pulls
+  // hub groups that share no links into one connected composition instead
+  // of drifting apart. Small on purpose — grouping still comes from links.
+  centerPullStrength: 0.025,
+
+  // Hub-group separation: each hub + its cluster orbit is treated as a
+  // GROUP ENVELOPE (orbit radius + that hub's largest cluster radius), and
+  // two envelopes may never get closer than this visible gap. The per-pair
+  // minimum hub distance is envelopeA + envelopeB + hubGroupGap — computed
+  // live in forceHubSeparation, never a fixed number, so bigger clusters
+  // automatically earn more breathing room.
+  //
+  // ⚠️ COUPLED TO clusterOrbitRadius. The envelope is derived from the orbit
+  // (buildHubEnvelopes), so pulling clusters closer to their Source shrinks
+  // every envelope and would drag the GROUPS together as a side effect. This
+  // gap absorbs that: it has been raised in step with every orbit reduction
+  // (80 → 146 → 182 as the orbit came 95 → 62 → 44), holding the per-pair
+  // minimum at the same ~290 units throughout — 54 + 54 + 182 today, against
+  // the original 105 + 105 + 80. Change one, re-check the other: the number
+  // that matters is the SUM, never this value on its own.
+  hubGroupGap: 182,
+  hubSeparationStrength: 0.5,
+
+  // Insight placement: every insight eases toward the live barycenter of the
+  // nodes it connects, so it sits BETWEEN its partners and its straight links
+  // take the shortest path instead of stretching past unrelated clusters.
+  // The collision force resolves the nearest free position around that
+  // target; the cluster-orbit facing logic then points connected clusters at
+  // the settled insight — the Source → Cluster → Insight chain aligns.
+  /**
+   * How far an insight leans from the plain barycentre of its partners toward
+   * its assigned ANCHOR group (0 = pure barycentre, 1 = sit on the anchor).
+   * 0.45 spreads insights across the groups they belong to while keeping them
+   * visibly between their partners.
+   */
+  insightAnchorBias: 0.45,
+  /** Minimum distance between two insights before they push apart (units). */
+  insightSeparation: 190,
+  /**
+   * Strength of that push — firm, since insights are sparse and high-value.
+   * Raised 0.55 → 0.8 when the cluster orbit tightened: a more compact layout
+   * packs everything closer, and at the old strength the barycentre and
+   * community pulls were overpowering the separation (closest pair fell from
+   * 149 to 114 units). This restores the spacing without loosening the groups.
+   */
+  insightSeparationStrength: 0.8,
+  insightBarycenterStrength: 0.15,
+
+  // Two-cluster hubs: a pair is arranged as a compact V flanking the
+  // direction of its external connections (never a flat 180° opposition).
+  // Full angle between the two arms, in degrees.
+  twoClusterVAngleDeg: 70,
+
+  // Multi-group insight communities: an insight linking 3+ different hub
+  // groups pulls those hubs gently toward itself (hubSeparation still floors
+  // their pairwise distance), and pushes UNRELATED hubs out of the corridor
+  // so nothing unrelated sits between the connected groups.
+  communityPullStrength: 0.035,
+  communityClearance: 150, // unrelated hub center must stay this far (+ envelope) from the insight
+  communityRepelStrength: 0.25,
+
+  // Insight ↔ group-envelope separation: the Source orbit belongs to
+  // CLUSTERS exclusively. Every insight must stay outside every group's
+  // envelope (orbit radius + largest cluster radius) by this visible gap —
+  // it may face a ring from outside, never complete it. Applied as a
+  // POSITIONAL projection (fraction of the penetration corrected per tick),
+  // so link tension can never hold an insight inside a ring at equilibrium.
+  insightEnvelopeGap: 24,
+  insightEnvelopeStrength: 0.6,
+
+  // Insight ↔ LINK clearance: an insight must also stay off every straight
+  // connection it is not an endpoint of. Collision keeps node off NODE; this
+  // keeps node off LINE, which is the other half of "a link never crosses
+  // something unrelated". Positional projection, insight-side only — link
+  // geometry and group spacing are never touched.
+  insightLinkClearance: 6,
+  insightLinkClearanceStrength: 0.35,
 
   // Link forces: different strengths for different link types
   linkStrength: 0.3, // Default link strength for influence connections
@@ -439,10 +768,85 @@ export const FORCE_SIMULATION = {
   // Source-Cluster bonds (kind='overlap') must be MUCH STRONGER
   // Clusters are neighborhood around their Source - they must stay bound
   clusterBondStrength: 0.8, // 2.67x stronger than default (0.3)
-  clusterBondDistance: 60, // Shorter than default (100) - keeps clusters closer to source
+  // Shorter than the default link (100): a cluster is a neighbourhood AROUND
+  // its Source, so the bond reads as attachment rather than as a connection
+  // between two independent things. Tightened 85 → 55 → 36 — the Source→Cluster
+  // lines were stretching well past what the relationship implies. Group-to-
+  // group spacing is deliberately NOT reduced with it (see hubGroupGap).
+  clusterBondDistance: 36,
+
+  // Radial cluster organization: a gentle positional force distributes each
+  // hub's clusters into EVEN angular slots on a consistent orbit around it
+  // (see forceClusterOrbit in useD3Force.ts). Soft on purpose — it organizes
+  // the neighborhood without making the layout rigid, and drag stays natural.
+  // Matches where the bond distance + collision settle, so the orbit and the
+  // link force agree instead of fighting. Tightened 95 → 62 → 44 alongside
+  // clusterBondDistance; see the hubGroupGap note for why group spacing did
+  // not follow it down.
+  //
+  // ⚠️ PACKING FLOOR ≈ 35. The busiest hub carries 7 clusters, and a ring of
+  // radius r spaces them by a chord of 2·r·sin(π/7) ≈ 0.87·r. That has to clear
+  // one cluster diameter (20) plus nodeCollisionGap (10), so r below ~35 makes
+  // the collision force fight the orbit and the ring buckles. 44 leaves a
+  // ~38-unit pitch — comfortably clear, with room to spare.
+  clusterOrbitRadius: 44,
+  clusterOrbitStrength: 0.32, // per-tick pull toward the slot (× alpha)
+
+  // Meaningful cross-group links — links through an Insight, or directly
+  // bridging different Source/Document neighborhoods — are pulled TIGHTER
+  // than generic influence links so related groups sit noticeably closer
+  // instead of stretching across the canvas. Groups still stay distinct:
+  // charge repulsion and the orbit rings keep neighborhoods separated.
+  crossGroupDistance: 90, // vs linkDistance 100
+  crossGroupStrength: 0.45, // vs linkStrength 0.3
 
   // Center attraction (pulls all nodes toward center)
   nodeStrength: -250,
+
+  // ── COLLISION ────────────────────────────────────────────────────────────
+  // Overlap protection covers EVERY visible node kind (source, cluster,
+  // insight, document) and is driven by each node's ACTUAL rendered radius
+  // (getEffectiveNodeRadius — weight-sized clusters, size-sized insights),
+  // not the base per-kind diameter: a size-14 insight renders at r=25 but
+  // the kind default is r=17.5, which is exactly how two big insights ended
+  // up overlapping. `nodeCollisionGap` is the visible breathing room kept
+  // between two circle edges.
+  nodeCollisionGap: 10, // visible gap between node edges (8–12 band)
+  collisionStrength: 0.9, // near-hard constraint; 1 can jitter
+  collisionIterations: 2, // relaxation passes per tick — resolves stacks
+
+  // ── SETTLING ─────────────────────────────────────────────────────────────
+  // The graph is pre-solved and warmed up OFF-SCREEN (see seedInitialLayout /
+  // warmupSimulation in useD3Force.ts), so the first paint is already close
+  // to the final layout. What runs after that is a short, low-alpha polish —
+  // not a visible multi-second reflow.
+  //
+  // alphaDecay only governs the FREE cooldown; a drag pins alpha via
+  // alphaTarget(0.3), so raising it speeds settling without stiffening drag.
+  // velocityDecay stays close to D3's 0.4 default for the same reason.
+  // 160 measured as the knee: identical final geometry (0 overlaps, 0
+  // crossings, same ~3px post-paint drift) as 240, at two thirds the
+  // pre-paint cost. The whole pre-solve runs in ~110ms on the demo graph.
+  warmupTicks: 160, // deterministic pre-render ticks (D3's own default run ≈ 300)
+  initialSettleAlpha: 0.12, // low-alpha restart after the warm-up render
+  alphaDecay: 0.045, // ~2× D3's 0.0228 → cools in ~150 ticks, not ~300
+  velocityDecay: 0.45, // slightly damper than 0.4: less overshoot, drag still fluid
+
+  // ── INSIGHT PRE-SOLVE (candidate scoring) ────────────────────────────────
+  // Before the simulation runs, every insight is placed by evaluating
+  // candidate positions around the barycenter of the nodes it actually
+  // connects to, and keeping the cheapest. Cost weights are ordered by what
+  // must never happen: a link crossing an unrelated node dwarfs everything,
+  // then node overlap, then envelope intrusion, then link length.
+  seedMargin: 40, // keep seeded positions this far inside the data space
+  insightCandidateAngles: 16, // candidate directions per ring
+  insightCandidateRadii: [0, 26, 52, 84, 124, 170], // ring offsets from the barycenter
+  insightSeedRounds: 2, // re-solve so insight↔insight pairs converge
+  seedCrossingClearance: 10, // a link must clear an unrelated circle by this
+  seedCostCrossing: 1000, // per unrelated node a straight link would cut
+  seedCostInsightOverlap: 24, // per unit of overlap with another insight
+  seedCostEnvelope: 14, // per unit of intrusion into a hub's group envelope
+  seedCostLength: 1, // per unit of total connection length
 
   // Collision detection: prevent overlap
   collisionRadius: (nodeType: string): number => {
@@ -472,6 +876,80 @@ export const HIERARCHY_LAYOUT = {
 }
 
 // ============================================================================
+// CANVAS BACKDROP
+// ============================================================================
+// The dot grid behind the graph. These are SCREEN pixels, not data-space units.
+//
+// It used to be an SVG <pattern> inside the graph's viewBox, which meant the
+// browser scaled it by the same factor it uses to fit the 800×600 data space
+// into the container — so the dots grew with the window and looked coarse on a
+// large display. It is now painted in CSS on the graph's container element,
+// where a px is a px at every viewport size. Tune the grid here; the component
+// binds these into its stylesheet.
+
+// The 20/1.5 pair below is what the OLD SVG pattern used in data space; the
+// viewBox then blew it up by the container/800 ratio — about 1.6× on a laptop —
+// so the dots that shipped were ~2.4px on a ~32px grid. Painting in CSS removed
+// that multiplier, and at 1.5px the grid stopped registering. These are the
+// screen-px equivalents of what the scaled version actually drew.
+export const BACKGROUND_PATTERN = {
+  spacing: 16, // Distance between dot centers, both axes — half of 32, so twice the dots per axis
+  dotRadius: 1.2, // Radius of a single dot — half of 2.4
+  feather: 0.5, // Extra px the dot fades over, so the edge isn't aliased
+  /*
+   * NO `color` here on purpose. The ink is the `background` theme token, read
+   * live from Vuetify in the component's stylesheet so it follows a theme swap;
+   * only this alpha crosses over from the tokens file. The grid therefore reads
+   * as a darker grain over the host canvas, strongest where that canvas is
+   * lightest. At full alpha each dot IS the background token, so the grid
+   * punches the canvas gradient back to page black rather than tinting it.
+   */
+  opacity: 1,
+}
+
+// ============================================================================
+// NODE BACKDROP GLASS — the frosted disc behind every .node-circle
+// ============================================================================
+/*
+ * A 2px blur of whatever is visible BEHIND a node's semi-transparent fill
+ * (the container's dot grid and the host screen's canvas gradient). The node
+ * itself, its stroke, its glow, its icon and its label are never blurred —
+ * they are drawn in the <svg>, which paints ON TOP of this layer.
+ *
+ * ⚠️ WHY THIS IS A CSS LAYER AND NOT AN SVG FILTER — measured, not assumed:
+ *
+ * 1. `backdrop-filter` on an SVG `<circle>` (or a `<g>` wrapping it) does
+ *    NOTHING in Blink/WebKit. Verified against a hard-edged stripe backdrop:
+ *    an HTML control element blurred it (20/110 mid-tone pixels across a
+ *    stripe edge), both SVG variants produced 0. The property would have been
+ *    inert on `.node-circle`.
+ * 2. SVG 1.1's `<feGaussianBlur in="BackgroundImage">` — the SVG-native way to
+ *    read the backdrop — also measured 0. It never shipped in Blink/WebKit and
+ *    was dropped from SVG 2.
+ * 3. An SVG filter over a duplicated backdrop layer would have nothing to
+ *    blur: `getConnectionEndpoints()` trims every link to `radius + gap`, so
+ *    links stop AT node boundaries and never pass behind a disc, and the
+ *    collision force keeps nodes off each other. The only thing actually
+ *    visible through a node's 10%-alpha fill is the container's CSS dot grid,
+ *    which no SVG filter can sample (it is painted outside the <svg>).
+ *
+ * So the glass is ONE HTML element with a real `backdrop-filter`, layered
+ * between the container's background and the <svg>, and clipped to the union
+ * of every node circle with a single `clip-path: path(…)` — one style write
+ * per frame, no per-node elements and no per-node filters.
+ */
+export const NODE_GLASS = {
+  /**
+   * Blur radius in CSS px. `backdrop-filter: blur()` works in SCREEN pixels,
+   * so this stays a constant 2px at every zoom level for free — no
+   * inverse-zoom compensation, unlike the SVG-space tokens above.
+   */
+  blurPx: 2,
+  /** Decimal places kept in the clip-path string (smaller = shorter style). */
+  pathPrecision: 2,
+}
+
+// ============================================================================
 // VIEWPORT & ZOOM
 // ============================================================================
 // Graph zoom and pan behavior
@@ -490,10 +968,40 @@ export const VIEWPORT = {
     fitPadding: 60,
   },
 
+  /*
+   * SOURCE FOCUS — clicking a Source in Unstructured mode flies the camera to
+   * that Source and the Clusters bound to it, and to nothing else.
+   *
+   * The fit is computed from ONLY those nodes, so unrelated groups are allowed
+   * to fall outside the viewport: including them is what would force the camera
+   * back out and defeat the gesture. `maxScale` stops a small group (a document
+   * hub with two clusters) from filling the screen at an absurd magnification.
+   */
+  sourceFocus: {
+    /** Breathing room in data units around the focused group's bounds. */
+    padding: 70,
+    /** Ceiling on the fitted scale — a tiny group must not zoom to a wall. */
+    maxScale: 2.2,
+    /** Camera flight time (ms). */
+    durationMs: 620,
+  },
+
   // D3 zoom extent [minZoom, maxZoom]
   // Min must stay at or below the initial framing scale (marginMultiplier above),
   // otherwise the first zoom gesture snaps the camera in past the initial view.
+  // The absolute token minimum is a FALLBACK: each layout mode clamps its own
+  // effective minimum at setup (see the scaleExtent derivation in
+  // NetworkGraphD3) — Structured to the exact fit scale, Unstructured to
+  // fit × minZoomOutFactor below.
   zoomExtent: [0.25, 4] as [number, number],
+
+  // Unstructured: the deepest zoom-OUT allowed, as a factor of the initial
+  // fit-to-view scale. 0.8 leaves a little breathing room past the full-graph
+  // framing but stops the graph from shrinking into an unreadable speck.
+  // Clamps gestures only (wheel, pinch, the − button via scaleBy) — the
+  // initial fit itself is applied with zoom.transform, which d3 never clamps,
+  // so the first-entry framing is unchanged.
+  minZoomOutFactor: 0.8,
 
   // Scroll wheel sensitivity
   wheelDeltaSensitivity: {
@@ -526,8 +1034,10 @@ export const SOURCE_NODES = {
     opacity: 0.95,
   },
   // Minimum ON-SCREEN diameter for a source node: when zooming out, the circle
-  // (and its icon, proportionally) stops shrinking at 16 × 16 rendered pixels.
-  minDiameter: 16,
+  // (and its icon, proportionally) stops shrinking at 12 × 12 rendered pixels.
+  // The BOTTOM of the per-kind clamp ladder (12 < cluster 14 < insight 24) —
+  // sources stay the smallest node kind at every zoom level.
+  minDiameter: 12,
 }
 
 // ============================================================================
@@ -700,10 +1210,25 @@ export function getNodeStrokeWidth(
   zoomScale: number = 1,
 ): number {
   const styling = getNodeStyling(nodeType)
-  if (typeof styling.strokeWidth === 'function') {
-    return styling.strokeWidth() * getInverseZoomScale(zoomScale)
+  const base = typeof styling.strokeWidth === 'function'
+    ? styling.strokeWidth()
+    : (styling.strokeWidth || 0)
+
+  /*
+   * A kind carrying `strokeScreen` opts OUT of flat inverse-zoom compensation
+   * and into a clamped rendered thickness (Insight — see its token block):
+   * the stroke tracks the node's visual size but can never render thinner
+   * than `min` or thicker than `max`. The returned value is the ATTRIBUTE, so
+   * it is divided back out of the live zoom transform.
+   */
+  const clamp = (styling as { strokeScreen?: { min: number, max: number } }).strokeScreen
+  if (clamp) {
+    const k = zoomScale > 0 ? zoomScale : 1
+    const rendered = Math.min(Math.max(base * k, clamp.min), clamp.max)
+    return rendered / k
   }
-  return (styling.strokeWidth || 0) * getInverseZoomScale(zoomScale)
+
+  return base * getInverseZoomScale(zoomScale)
 }
 
 /**
@@ -775,30 +1300,46 @@ export function getSourceNodeRadius(zoomScale: number = 1): number {
  * under/into the circles (the low-zoom endpoint bug this consolidates away).
  *
  * Per node type:
- * - source:  base radius, clamped to a 16px minimum SCREEN diameter → grows
- *            in data units as zoom decreases (the only zoom-dependent kind)
- * - cluster: dynamic from weight (preferred) or entityCount
- * - insight: dynamic from its size metric
+ * - source:  base radius, clamped to a 12px minimum SCREEN diameter → grows
+ *            in data units as zoom decreases
+ * - cluster: dynamic from weight (preferred) or entityCount, clamped to a
+ *            14px minimum SCREEN diameter
+ * - insight: dynamic from its size metric, clamped to a 24px minimum SCREEN
+ *            diameter
  * - others:  fixed per-type diameter
+ *
+ * The three clamps are ordered (12 < 14 < 24) exactly like the three base
+ * ranges (12 < 14–60 < 24–50 minimums), which is what enforces the
+ * Source < Cluster < Insight hierarchy at EVERY zoom level — without the
+ * cluster/insight clamps, zooming out shrank variable-size nodes below the
+ * screen-clamped sources and inverted the hierarchy.
  */
 export function getEffectiveNodeRadius(
   node: { kind?: string, size?: number } & Record<string, any>,
   zoomScale: number = 1,
 ): number {
   const kind = node.kind || ''
-  if (kind === 'source') {
+  const k = zoomScale > 0 ? zoomScale : 1
+  // Source AND document hubs share the same base diameter (12) and the same
+  // 12px minimum screen size — document hubs are hub nodes exactly like
+  // sources, and clamping only one of the two left document circles (and
+  // their icons) visibly smaller at low zoom.
+  if (kind === 'source' || kind === 'document') {
     return getSourceNodeRadius(zoomScale)
   }
   if (kind === 'cluster') {
-    if (node.weight !== undefined) {
-      return getNodeRadiusForType(kind, node.weight, true)
-    }
-    if (node.entityCount !== undefined) {
-      return getNodeRadiusForType(kind, node.entityCount, false)
-    }
+    const dataRadius = node.weight !== undefined
+      ? getNodeRadiusForType(kind, node.weight, true)
+      : node.entityCount !== undefined
+        ? getNodeRadiusForType(kind, node.entityCount, false)
+        : getNodeRadiusForType(kind)
+    return Math.max(dataRadius, (CLUSTER_SIZING.minScreenDiameter / 2) / k)
   }
-  if (kind === 'insight' && node.size) {
-    return getNodeRadiusForType(kind, node.size)
+  if (kind === 'insight') {
+    const dataRadius = node.size
+      ? getNodeRadiusForType(kind, node.size)
+      : getNodeRadiusForType(kind)
+    return Math.max(dataRadius, (INSIGHT_SIZING.minScreenDiameter / 2) / k)
   }
   return getNodeRadiusForType(kind)
 }
@@ -811,5 +1352,18 @@ export function getEffectiveNodeRadius(
  */
 export function getSourceIconDiameter(zoomScale: number = 1): number {
   const iconRatio = ICON_CONFIG.source.iconSize / NODE_DIAMETERS.source
+  return getSourceNodeRadius(zoomScale) * 2 * iconRatio
+}
+
+/**
+ * Document icon diameter (data units) — same recipe as the source icon:
+ * proportional to the (clamped) hub circle so the icon is never tiny at low
+ * zoom, scales naturally with the node, keeps its aspect ratio (square box,
+ * centered by the caller), and never outgrows its circle. Replaces the old
+ * ABSOLUTE 20px document icon, which had no minimum and rendered visibly
+ * smaller than the tool icons.
+ */
+export function getDocumentIconDiameter(zoomScale: number = 1): number {
+  const iconRatio = ICON_CONFIG.document.iconSize / NODE_DIAMETERS.document
   return getSourceNodeRadius(zoomScale) * 2 * iconRatio
 }

@@ -23,6 +23,10 @@ import { renderEntityRing } from './components/renderEntityRing'
 import { renderClusterRing } from './components/renderClusterRing'
 import { renderClusterEntityBridge } from './components/renderClusterEntityBridge'
 import { renderRadialConnections } from './components/renderRadialConnections'
+import { isMeaningfulConnection, representativeId } from './structuredHover'
+import { NODE_STYLING } from '@/components/graphs/graphTokens'
+import { appendLinkDefs } from '@/components/graphs/linkRenderer'
+import { deriveStructuredDemoLinks } from './structuredDemoLinks'
 
 export interface StructuredRendererConfig {
   width: number
@@ -34,6 +38,8 @@ export interface StructuredRendererConfig {
   sentimentLabel?: string
   // Chart theme object (passed from NetworkGraphD3.vue component context)
   chartTheme?: any
+  /** Cluster click → the Structured focus drill-down (structuredFocus.ts). */
+  onClusterClick?: (clusterId: string) => void
 }
 
 export interface PositionedNode extends NetworkNode {
@@ -45,7 +51,7 @@ export interface PositionedNode extends NetworkNode {
 export function useStructuredRenderer() {
   /**
    * Helper: Reposition cluster nodes to the entity ring.
-   * Entity ring shows cluster summaries at a different radius (300px) than the cluster ring (400px).
+   * Entity ring shows cluster summaries at a different radius (STRUCTURED_RINGS.entity) than the cluster ring (STRUCTURED_RINGS.cluster).
    * This creates repositioned copies for entity-ring rendering.
    */
   function repositionNodesToEntityRing(clusterNodes: PositionedNode[]): PositionedNode[] {
@@ -56,7 +62,7 @@ export function useStructuredRenderer() {
       // never use a falsy check here, it silently skipped the 3-o'clock node)
       if (node.angle === undefined) return node
 
-      // Recalculate x/y using entity ring radius (300px) instead of cluster ring radius (400px)
+      // Recalculate x/y using the entity ring radius instead of the cluster ring radius
       const x = Math.cos(node.angle) * entityOrbitDistance
       const y = Math.sin(node.angle) * entityOrbitDistance
 
@@ -74,13 +80,20 @@ export function useStructuredRenderer() {
   }
 
   /**
-   * Count the connections that continue INWARD from each cluster's entity
-   * summary into the Structured graph: links in the currently filtered set
-   * touching that cluster id where both endpoints resolve to positioned
-   * nodes (mirroring what renderRadialConnections actually draws). The
-   * render-level Cluster → Entity bridge is not a link, so it is never
-   * counted. The cluster → entity-summary mapping is the existing identity
-   * mapping (same node id repositioned) — no duplicate graph data.
+   * Count the VISIBLE relationships of each cluster's entity summary — the
+   * exact connections cluster hover lights up, so the number in the circle
+   * and the lit lines on hover can never disagree.
+   *
+   * Uses the SAME normalization rules as structuredHover.ts:
+   * - endpoints resolve through representative ids (a raw entity stands for
+   *   its owning cluster summary);
+   * - both endpoints must be VISIBLE ring kinds (connections to invisible
+   *   source/document hubs are never drawn as meaningful lines, so they are
+   *   never counted);
+   * - self-links (cluster ↔ its own raw entity — both representatives equal)
+   *   are never highlighted, so they are never counted.
+   * The render-level Cluster → Entity bridge is not a link and is never
+   * counted either.
    */
   function computeEntityConnectionCounts(
     positionedNodes: PositionedNode[],
@@ -94,17 +107,23 @@ export function useStructuredRenderer() {
       typeof endpoint === 'string' ? endpoint : endpoint?.id
 
     for (const link of links) {
-      const sourceId = endpointId(link.source)
-      const targetId = endpointId(link.target)
-      const sourceNode = nodeMap.get(sourceId)
-      const targetNode = nodeMap.get(targetId)
+      const sourceNode = nodeMap.get(endpointId(link.source))
+      const targetNode = nodeMap.get(endpointId(link.target))
       if (!sourceNode || !targetNode) continue // dropped by the renderer too
+      const conn = { sourceNode, targetNode }
+      // The SAME predicate the mesh draws by — so a summary reading 0 provably
+      // has no line, and a line provably belongs to a non-zero count.
+      if (!isMeaningfulConnection(conn)) continue
+      const sourceRep = representativeId(sourceNode)
+      const targetRep = representativeId(targetNode)
 
-      if (sourceNode.kind === 'cluster') {
-        counts.set(sourceId, (counts.get(sourceId) || 0) + 1)
+      // Attribute to any endpoint whose REPRESENTATIVE is a cluster summary —
+      // a raw entity endpoint counts for its owning cluster.
+      if (sourceNode.kind === 'cluster' || sourceNode.kind === 'entity') {
+        counts.set(sourceRep, (counts.get(sourceRep) || 0) + 1)
       }
-      if (targetNode.kind === 'cluster') {
-        counts.set(targetId, (counts.get(targetId) || 0) + 1)
+      if (targetNode.kind === 'cluster' || targetNode.kind === 'entity') {
+        counts.set(targetRep, (counts.get(targetRep) || 0) + 1)
       }
     }
     return counts
@@ -131,12 +150,60 @@ export function useStructuredRenderer() {
     const centerX = config.width / 2
     const centerY = config.height / 2
 
+    // ── INSIGHT GLOW DEFS ─────────────────────────────────────────────────
+    // The SAME `insight-shadow` / `insight-shadow-hover` filters the
+    // Unstructured pass defines (same ids, same NODE_STYLING.insight tokens).
+    // They must exist in THIS pass too: the SVG is cleared on mode switch,
+    // and both the insight ring and the focus drill-down reference them —
+    // an `.insight-node` referencing a missing filter would not paint at all.
+    // Declared here (not in renderInsightRing) so they exist even when the
+    // ring renders zero insights.
+    const defs = svg.append('defs')
+    const glowDef = (id: string, glow: { blur: number, color: string, opacity: number, regionMargin: number }) => {
+      defs.append('filter')
+        .attr('id', id)
+        .attr('x', `${-glow.regionMargin * 100}%`)
+        .attr('y', `${-glow.regionMargin * 100}%`)
+        .attr('width', `${(1 + glow.regionMargin * 2) * 100}%`)
+        .attr('height', `${(1 + glow.regionMargin * 2) * 100}%`)
+        .append('feDropShadow')
+        .attr('dx', 0)
+        .attr('dy', 0)
+        .attr('stdDeviation', glow.blur / 2) // CSS blur = 2 × stdDeviation
+        .attr('flood-color', glow.color)
+        .attr('flood-opacity', glow.opacity)
+    }
+    glowDef('insight-shadow', NODE_STYLING.insight.glow)
+    glowDef('insight-shadow-hover', NODE_STYLING.insight.hover.glow)
+
+    // ── CONNECTION DEFS ───────────────────────────────────────────────────
+    // The same reason as the filters above, and the same trap: a paint server
+    // is per-SVG. Anything in this pass stroked with
+    // `url(#link-gradient-foreground)` — the cluster FOCUS connections
+    // (structuredFocus.ts), STRUCTURED_CONNECTIONS.line — draws NOTHING at all
+    // if the def is absent, because SVG does not render an element whose paint
+    // server reference cannot be resolved. That was the "missing focus
+    // connections" bug: correct geometry, correct opacity, no paint.
+    appendLinkDefs(defs as any)
+
     // Create main viewport group for all rings
     // Use class 'viewport' (same as unstructured) so zoom transform can be applied uniformly
     const viewport = svg
       .append('g')
       .attr('class', 'viewport')
       .attr('transform', `translate(${centerX}, ${centerY})`)
+
+    /*
+     * The link list every downstream consumer sees: the dataset's own links
+     * PLUS the deterministic demo relationships (structuredDemoLinks.ts). One
+     * list, built once — the mesh, the entity counts and the focus all read it,
+     * so a drawn line, the number in its endpoint's summary and the focus's
+     * idea of what relates can never disagree.
+     */
+    const linkSet: NetworkLink[] = [
+      ...links,
+      ...deriveStructuredDemoLinks(positionedNodes, links),
+    ]
 
     // Organize nodes by kind for ring-based rendering
     const nodesByKind = new Map<string, PositionedNode[]>()
@@ -146,6 +213,19 @@ export function useStructuredRenderer() {
       }
       nodesByKind.get(node.kind)!.push(node)
     })
+
+    /*
+     * THE ROTOR. Everything that lives on a ring goes inside this group so
+     * the Structured FOCUS interaction can rotate the whole radial graph as
+     * one rigid body (structuredFocus.ts) — the clicked cluster travels to
+     * the focus side still attached to its ring, rather than being lifted out
+     * of it.
+     *
+     * The centre ring is deliberately appended OUTSIDE the rotor: it sits at
+     * the origin so rotation would not move it, but it would spin its avatar
+     * initials and "Sentiment Rate" text upside down.
+     */
+    const rotor = viewport.append('g').attr('class', 'structured-rotor')
 
     // ── RENDERING DISPATCH ────────────────────────────────────────────
     // Paint order (SVG: later = on top): connections and bridges first so
@@ -157,11 +237,11 @@ export function useStructuredRenderer() {
     // list, so every bundled curve that used to originate at a cluster now
     // originates at its entity summary — the cluster itself only carries the
     // single direct bridge. Hover semantics are unchanged (same node ids).
-    if (links.length > 0) {
+    if (linkSet.length > 0) {
       const connectionNodes = positionedNodes.map(node =>
         node.kind === 'cluster' ? repositionNodesToEntityRing([node])[0] : node,
       )
-      renderRadialConnections(viewport as any, connectionNodes, links, {centerX: 0, centerY: 0})
+      renderRadialConnections(rotor as any, connectionNodes, linkSet, {centerX: 0, centerY: 0, zoom: config.zoom})
     }
 
     // Cluster → Entity bridges: one direct radial line per cluster to its
@@ -169,21 +249,21 @@ export function useStructuredRenderer() {
     // no links are added to the dataset.
     const clusterNodes = nodesByKind.get('cluster') || []
     if (clusterNodes.length > 0) {
-      renderClusterEntityBridge(viewport as any, clusterNodes, { chartTheme: config.chartTheme })
+      renderClusterEntityBridge(rotor as any, clusterNodes, { chartTheme: config.chartTheme })
     }
 
     // Insight ring: uniform-size insights with optional badges
     const insightNodes = nodesByKind.get('insight') || []
     if (insightNodes.length > 0) {
-      renderInsightRing(viewport as any, insightNodes, links, {centerX: 0, centerY: 0, zoom: config.zoom, chartTheme: config.chartTheme})
+      renderInsightRing(rotor as any, insightNodes, linkSet, {centerX: 0, centerY: 0, zoom: config.zoom, chartTheme: config.chartTheme})
     }
 
-    // Entity ring: cluster-summary circles positioned at entity ring radius (300px)
+    // Entity ring: cluster-summary circles positioned at the entity ring radius
     // Uses the same cluster data as Cluster ring but at a different orbital distance
     if (clusterNodes.length > 0) {
       const entityRingPositionedNodes = repositionNodesToEntityRing(clusterNodes)
-      const connectionCounts = computeEntityConnectionCounts(positionedNodes, links)
-      renderEntityRing(viewport as any, entityRingPositionedNodes, {
+      const connectionCounts = computeEntityConnectionCounts(positionedNodes, linkSet)
+      renderEntityRing(rotor as any, entityRingPositionedNodes, {
         chartTheme: config.chartTheme,
         connectionCounts,
       })
@@ -191,7 +271,7 @@ export function useStructuredRenderer() {
 
     // Cluster ring: uniform-size clusters with source icons + arc labels
     if (clusterNodes.length > 0) {
-      renderClusterRing(viewport as any, clusterNodes, links, {centerX: 0, centerY: 0, zoom: config.zoom, chartTheme: config.chartTheme})
+      renderClusterRing(rotor as any, clusterNodes, linkSet, {centerX: 0, centerY: 0, zoom: config.zoom, chartTheme: config.chartTheme, onClusterClick: config.onClusterClick})
     }
 
     // Center ring LAST: the fully opaque avatar must cover any line that
