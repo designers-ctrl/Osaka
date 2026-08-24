@@ -279,11 +279,38 @@ const ANCHOR = {
  * places the camera here once, on opening, and FREEZES it — pan and zoom are
  * off for as long as the drill-down is open, so the detail area cannot move.
  */
-export function computeFocusCamera(): d3.ZoomTransform {
-  const k = (Math.min(V.dataWidth, V.dataHeight) * D.wheel.radiusFitFraction) / STRUCTURED_RINGS.cluster
+export function computeFocusCamera(directionsDeg: number[] = []): d3.ZoomTransform {
+  /*
+   * SCALE IN PLACE, SHIFTED AWAY FROM THE SELECTIONS. The base is the same
+   * centred form the Structured overview camera uses with the scale backed
+   * off by `shrinkFactor` — the ring shrinks where it stands. On top of that,
+   * `directionsDeg` (the open selections' displayed spoke angles) slides the
+   * whole graph a bounded step in the OPPOSITE mean direction: a cluster
+   * clicked in the upper half pushes the ring down, so its expanded region
+   * opens into the freed upper space — a clean two-zone composition. Opposite
+   * selections cancel toward no shift; the caller animates the move.
+   */
+  const overviewK = Math.min(V.dataWidth, V.dataHeight)
+    / (2 * (V.outerRadius + V.fitPadding))
+  let dx = 0
+  let dy = 0
+  if (directionsDeg.length) {
+    let sx = 0
+    let sy = 0
+    for (const deg of directionsDeg) {
+      sx += Math.cos((deg * Math.PI) / 180)
+      sy += Math.sin((deg * Math.PI) / 180)
+    }
+    const mean = Math.hypot(sx, sy) / directionsDeg.length
+    if (mean > 1e-3) {
+      const len = Math.hypot(sx, sy)
+      dx = -(sx / len) * D.adaptiveShift * mean
+      dy = -(sy / len) * D.adaptiveShift * mean
+    }
+  }
   return d3.zoomIdentity
-    .translate(V.dataWidth * D.wheel.centerXFraction, V.dataHeight * D.wheel.centerYFraction)
-    .scale(k)
+    .translate(V.dataWidth / 2 + dx, V.dataHeight / 2 + dy)
+    .scale(overviewK * D.shrinkFactor)
 }
 
 /** The fixed camera, resolved once — the layout converts through it. */
@@ -364,42 +391,38 @@ interface BandLayout {
 }
 
 /**
- * Place ONE model's items inside its own BAND of the fixed detail area.
+ * Lay ONE selection out along its own RAY.
  *
- * A band is a horizontal slice of the zone: with one cluster selected it is the
- * whole zone, with three it is a third of it. The zone itself never changes, so
- * selecting a second cluster re-flows the fields rather than moving the area.
+ * The band's origin is the selected cluster's position on the ring (the node
+ * itself never moves), and everything the drill-down adds extends OUTWARD
+ * along the cluster's displayed spoke direction: insights on the ray, then the
+ * expanded region circle just past the wheel's outer extent. With several
+ * clusters open, each takes its own spoke — the regions distribute around the
+ * canvas by the geometry of the selections themselves, and the radial graph
+ * never moves.
  *
- * ── THE EXPANDED REGION IS THE UNSTRUCTURED ONE ──────────────────────────
+ * Entity placement inside the region is the SHARED `packEntities`
+ * (useDrilldownModel) — same collision, containment, chip reservation and
+ * outer-annulus bias as the Unstructured drill-down. Band coordinates stay
+ * UNROTATED (only positions lie on the ray), so entity labels remain
+ * horizontal at every spoke angle.
  *
- * Entities are NOT laid out here at all: the band draws an expanded-cluster
- * REGION — the same component the Unstructured drill-down opens — and the
- * placement inside it comes from the SHARED `packEntities` (useDrilldownModel):
- * the same golden-angle seed, the same local collision/containment relaxation,
- * the same chip-reservation box, the same outer-annulus bias for externally
- * connected entities. One layout implementation, two modes.
- *
- * The region's RADIUS is the shared `getRegionRadius(count)`, capped so the
- * circle fits its band; its centre sits toward the zone's right edge, leaving
- * the insight column between the pinned cluster and the region.
- *
- * Insights sit in that column, so the chain reads
- * cluster → insight → region, travelling outward from the pinned cluster.
- *
- * Coordinates are LOCAL to the band: (0, 0) is the pinned cluster itself.
+ * `regionDist` — the region CENTRE's distance from the graph origin — is
+ * decided by the caller (it de-collides multiple regions there), so this
+ * function only converts it into the band's local frame.
  */
 function layoutDetail(
   model: StructuredFocusModel,
-  bandHeight: number,
+  regionLocal: { x: number, y: number, r: number },
   biasFor: (id: string) => ExternalBias | null,
 ): BandLayout {
-  const n = model.leaves.length
-
-  // The shared count-adaptive radius, capped by the band and the zone width.
-  const maxByBand = Math.max((bandHeight - D.bandGap) / 2, 44)
-  const maxByWidth = Math.max((ZONE.x1 - INSIGHT_X - 60) / 2, 44)
-  const r = Math.min(getRegionRadius(n), maxByBand, maxByWidth)
-  const region = { x: Math.max(ZONE.x1 - r - 12, INSIGHT_X + 60 + r), y: 0, r }
+  /*
+   * The region's centre arrives PRE-PLACED (update() runs the overlap/viewport
+   * candidate search over every open selection at once — placement cannot be
+   * decided per band without seeing the others). This function only packs the
+   * entities inside the circle it is given.
+   */
+  const region = { x: regionLocal.x, y: regionLocal.y, r: regionLocal.r }
 
   /*
    * Label-aware collision, the Unstructured rule verbatim: entities that will
@@ -427,7 +450,7 @@ function layoutDetail(
   const leaves: PlacedItem[] = packEntities(
     model.clusterId,
     entityNodes,
-    r,
+    region.r,
     collideExtraOf,
     node => biasFor(node.id),
     chipReservedBox(model.rootLabel),
@@ -440,19 +463,12 @@ function layoutDetail(
     labelled: !!biasFor(placement.node.id),
   }))
 
-  const height = Math.max(bandHeight - D.bandGap, D.bandGap)
-  const insights: PlacedItem[] = model.insights.map((item, i, all) => {
-    const span = Math.min(height * 0.62, all.length * 90)
-    const step = all.length > 1 ? span / (all.length - 1) : 0
-    return {
-      ...item,
-      tier: 'insight' as const,
-      x: INSIGHT_X,
-      y: -span / 2 + i * step,
-    }
-  })
-
-  return { placed: [...insights, ...leaves], region }
+  /*
+   * NO insight items. The wheel's own insight-ring nodes are the single source
+   * of truth — the focus never duplicates them; the chain resolves their LIVE
+   * ring positions at draw time (see insightRingLocal in the controller).
+   */
+  return { placed: leaves, region }
 }
 
 export interface StructuredFocusRenderOptions {
@@ -506,6 +522,8 @@ export interface StructuredFocusHandle {
    * Pinned clusters do not move: they no longer live in the rotor.
    */
   rotateBy: (deltaDeg: number) => void
+  /** The wheel's current rotation (deg) — displayed angle = ring angle + this. */
+  currentRotationDeg: () => number
   destroy: (animate: boolean) => void
 }
 
@@ -537,7 +555,6 @@ interface PinnedCluster {
   biases: Map<string, ExternalBias>
   marks: {
     leafDots: AnySelection
-    insightDots: AnySelection
     labels: AnySelection
     /** The centered category chip (scaled constant-screen in applyGeometry). */
     chip: AnySelection | null
@@ -626,82 +643,55 @@ export function createStructuredFocus(viewportGroup: ViewportSelection): Structu
   const pinned = new Map<string, PinnedCluster>()
   /** The cross-cluster relation lines, rebuilt whenever the selection changes. */
   let relationGroup: AnySelection | null = null
-
-  /* ── Where a pinned cluster sits, in the viewport's own coordinates ────── */
-  const bandHeightFor = (count: number) => ZONE.height / Math.max(count, 1)
-  const slotOffsetY = (index: number, count: number) =>
-    ZONE.y0 + (index + 0.5) * bandHeightFor(count)
+  /** The last render options — rotateBy re-anchors the relations with them. */
+  let lastOpts: StructuredFocusRenderOptions | null = null
 
   /**
-   * ── WHERE EACH OPEN CLUSTER'S BAND SITS ──────────────────────────────────
+   * The LIVE band-local position of one of the wheel's own insight nodes.
    *
-   * Several open clusters used to be stacked in ONE vertical column: every
-   * band took the same x and an index-driven y, which read as a list rather
-   * than a composition and left the right-hand canvas half empty.
-   *
-   * Bands are now placed by SCORING candidate positions over a fixed lattice
-   * spanning the zone, in click order:
-   *
-   *   · a candidate is REJECTED outright if its region circle would leave the
-   *     zone or come within `gap` of an already-placed circle — so overlap and
-   *     clipping are impossible rather than merely unlikely;
-   *   · among the survivors the cost prefers a SHORT connector back to the
-   *     pinned cluster, minus a spread term that pushes a band away from the
-   *     ones already down. Short-line pull plus spread push is what produces
-   *     the loose stagger instead of either a column or a scatter.
-   *
-   * The x range is deliberately bounded: a band carries its insight column and
-   * entity field to the zone's right edge, so moving it far left would push
-   * that content over the radial graph and far right would clip it. Inside
-   * that bound the composition still uses both axes.
-   *
-   * Deterministic: candidates are visited in a fixed order, ties keep the
-   * earlier one, and the input order is the click order.
+   * The insight ring lives in the rotor, so its displayed position is the
+   * node's ring coordinates turned by the current roulette rotation; the band
+   * is anchored on its cluster's displayed position, so the difference is the
+   * local point the chain lines aim at. Resolved at DRAW time — applyGeometry
+   * runs on every rotation step — so the lines follow the real nodes through
+   * the roulette. Radius from the drawn node itself, so line trimming can
+   * never disagree with what is actually on screen.
    */
-  function computeBandSlots(
-    radii: number[],
-  ): Array<{ x: number, y: number }> {
-    const count = radii.length
-    if (count === 0) return []
-    // One band: leave the established single-band position exactly as it was.
-    if (count === 1) return [{ x: 0, y: slotOffsetY(0, 1) }]
-
-    /*
-     * ── Y: the guaranteed-clear spacing. X: the stagger. ──────────────────
-     *
-     * The band rows keep the original even division of the zone, and that is
-     * deliberate: each band's radius is already capped at `(bandHeight - gap)/2`
-     * by `layoutDetail`, so consecutive rows CANNOT overlap however large the
-     * clusters are. Overlap is prevented by construction rather than by a
-     * collision test — which is what an earlier scored version got wrong here,
-     * because it had to predict the radius `layoutDetail` would choose and any
-     * disagreement let two circles touch.
-     *
-     * The composition then comes from X: a fixed, index-driven stagger that
-     * slides each band off the column. Because the rows are already clear
-     * vertically, moving a band sideways can never create an overlap — it only
-     * changes where in its own row the circle sits.
-     *
-     * Bounded on purpose: a band carries its insight column and entity field
-     * out to the zone's right edge, so a large shift would push that content
-     * over the radial graph on one side or off the canvas on the other. The
-     * bound is also what keeps every circle inside the visible area.
-     */
-    const xSpread = ZONE.width * 0.16
-    const STAGGER = [-1, 0.62, -0.34, 1]
-    return radii.map((r, index) => {
-      const localX = Math.max(ZONE.x1 - r - 12, INSIGHT_X + 60 + r)
-      let dx = xSpread * STAGGER[index % STAGGER.length]
-      // Clamp so the circle stays fully inside the zone at this row.
-      const minDx = ZONE.x0 + r - localX
-      const maxDx = ZONE.x1 - r - localX
-      dx = Math.max(minDx, Math.min(maxDx, dx))
-      return { x: dx, y: slotOffsetY(index, count) }
-    })
+  function insightRingLocal(
+    entry: PinnedCluster,
+    insightId: string,
+  ): { x: number, y: number, r: number } | null {
+    const node = viewportGroup.selectAll<SVGCircleElement, any>('circle.insight-node')
+      .filter((d: any) => d?.id === insightId)
+    if (node.empty()) return null
+    const d: any = node.datum()
+    const rad = (rotationDeg * Math.PI) / 180
+    const cos = Math.cos(rad)
+    const sin = Math.sin(rad)
+    const x = (d.x ?? 0) * cos - (d.y ?? 0) * sin
+    const y = (d.x ?? 0) * sin + (d.y ?? 0) * cos
+    return {
+      x: x - (entry.bandX ?? 0),
+      y: y - (entry.bandY ?? 0),
+      r: Number(node.attr('r')) || INSIGHT_RING.nodeRadius,
+    }
   }
 
-  /** The pinned clusters' y in the band frame — connectors run back to it. */
-  const ANCHOR_LOCAL_Y = 0
+  /**
+   * The RESTING opacity of ONE entity label at the current camera scale.
+   * Below the reveal threshold every label is hidden (dots only — hover shows
+   * one name at a time). Past the threshold, only entities that carry a REAL
+   * Entity↔Entity relationship (`labelled` — set from the shared cross-region
+   * pair derivation) reveal their names: the label explains a relationship
+   * line, and an unrelated entity stays a dot at every zoom. One rule, read
+   * by the initial draw, the hover handlers, the isolation clear and every
+   * zoom rescale, so they can never disagree.
+   */
+  function restingLabelOpacityOf(d: { labelled?: boolean }): number {
+    return cameraK >= F.selection.entityLabelZoomThreshold && d?.labelled
+      ? EXPANDED_CLUSTER.entityLabel.persistentOpacity
+      : 0
+  }
 
   /** Mark radius for an item, in DATA units at the current camera scale. */
   const radiusOf = (item: PlacedItem | undefined) => {
@@ -780,100 +770,12 @@ export function createStructuredFocus(viewportGroup: ViewportSelection): Structu
 
   /* ── Pinning: move the REAL node out of the wheel, and put it back ─────── */
 
-  /**
-   * PIN — lift the cluster's EXISTING elements out of the wheel and re-anchor
-   * them at a slot. Nothing is drawn twice: the node, its entity summary, its
-   * count badge and its cluster→entity bridge are the very elements the ring
-   * rendered, moved by `appendChild` into a wrapper whose transform is the
-   * delta from their ring position to the slot. Their own coordinates are
-   * untouched, so the unit travels rigidly and keeps its internal geometry.
-   */
-  function pinNode(entry: PinnedCluster, x: number, y: number) {
-    if (!entry.wrapper) {
-      const nodeEl = clusterGroups.filter((d: any) => d?.id === entry.model.clusterId)
-        .node() as SVGGElement | null
-      if (!nodeEl) return
-      const datum: any = d3.select(nodeEl).datum()
-      entry.node = nodeEl
-      entry.ringX = datum?.x ?? 0
-      entry.ringY = datum?.y ?? 0
-      // The spoke angle this cluster sits at. Pinning UNWINDS it (below), so
-      // the unit reads horizontally instead of keeping its radial tilt.
-      entry.ringAngleDeg = ((datum?.angle ?? 0) * 180) / Math.PI
-      const unit = [
-        nodeEl,
-        ...(satellites.filter((d: any) => d?.id === entry.model.clusterId).nodes() as SVGGElement[]),
-      ]
-      // Remember exactly where each element came from, so releasing puts the
-      // cluster back into the ring in its original order as well as position.
-      entry.moved = unit.map(el => ({ el, parent: el.parentNode, next: el.nextSibling }))
-      const wrapper = selectionLayer.append('g')
-        .attr('class', 'structured-pinned-cluster')
-        .attr('data-cluster-id', entry.model.clusterId)
-      for (const el of unit) (wrapper.node() as SVGGElement).appendChild(el)
-      entry.wrapper = wrapper
-    }
     /*
-     * ⚠️ NAMED. `applySelectionHighlight` runs a fade on the same elements in
-     * the same pass, and two UNNAMED transitions on one element cancel each
-     * other — the unit was starting its move to the slot and being interrupted
-     * a frame later, leaving it at its old ring position.
-     */
-    /*
-     * ── THE UNIT IS NORMALISED HORIZONTAL ────────────────────────────────
-     * `translate(...) rotate(-angle, ringX, ringY)`: the rotation unwinds the
-     * cluster's own spoke about its ring position, so the radial run
-     * `entity summary → bridge/badge → cluster` becomes a horizontal row, and
-     * the translate then carries that row to its slot. Reading right to left
-     * on screen the cluster is outermost, exactly as on the ring.
-     *
-     * Still ONE move of the ORIGINAL elements — nothing is duplicated, and each
-     * element keeps its own coordinates.
-     */
-    /*
-     * ── LIFTED AT THE FOCUS POINT, NOT RELOCATED ─────────────────────────
-     * The wheel has already turned this cluster to the focus angle, so the
-     * ANCHOR is where it now sits ON THE RING. Pinning there — and NOT at
-     * `ANCHOR + PIN_X`, which used to drag it ~300px further toward the middle
-     * of the canvas — makes it read as the same cluster lifted off the rim
-     * rather than a node that travelled somewhere else. The unwind rotation is
-     * about the node's own centre, so it stops turning with the rotor while
-     * its bridge, badge and entity summary swing level beside it.
-     *
-     * The band still lives in the detail area; `entry.clusterOffset` is where
-     * the node sits in that band's frame, so the lines drawn from the cluster
-     * start on the real node rather than at the band's empty origin.
-     */
-    const unwind = -(entry.ringAngleDeg ?? 0)
-    entry.clusterOffset = { x: x - (entry.bandX ?? x), y: y - (entry.bandY ?? y) }
-    entry.wrapper.transition('pin').duration(F.transitionMs)
-      .attr(
-        'transform',
-        `translate(${x - entry.ringX}, ${y - entry.ringY}) rotate(${unwind}, ${entry.ringX}, ${entry.ringY})`,
-      )
-    /*
-     * Marks that must stay UPRIGHT inside the unwound unit re-tilt by the same
-     * angle: the wrapper turned them by `unwind`, so +angle puts them back
-     * level. The logo counter-rotates about the node's own centre; the count
-     * about its summary group's origin.
-     */
-    const upright = `rotate(${entry.ringAngleDeg ?? 0})`
-    d3.select(entry.node!).select('image.cluster-source-icon')
-      .interrupt().attr('transform', upright)
-    entry.wrapper.selectAll('g.entity-summary-group text.entity-count')
-      .interrupt('orient').attr('transform', upright)
-  }
-
-  /**
-   * Put a released cluster's elements back exactly where they came from.
-   *
-   * ⚠️ The remembered `next` sibling is only a HINT. Between pinning and
-   * releasing, other clusters may have been pinned and released around it, so
-   * that node is not guaranteed to still be a child of the same parent —
-   * `insertBefore` throws on that, which used to abort the release half-way and
-   * strand the wrapper. Falling back to `appendChild` restores the element to
-   * the right parent whatever happened in between; ordering inside a ring layer
-   * carries no meaning.
+   * ⚠️ NOTHING IS PINNED OUT OF THE RING ANY MORE. The selected cluster's
+   * node, logo, badge and bridge all stay exactly where the wheel drew them —
+   * the band ANCHORS ON the cluster's displayed position instead of moving
+   * the cluster to the band. `releaseNode` survives only to unwind state from
+   * older sessions' moved units (entry.moved is always empty now).
    */
   function releaseNode(entry: PinnedCluster) {
     for (const { el, parent, next } of entry.moved) {
@@ -887,8 +789,6 @@ export function createStructuredFocus(viewportGroup: ViewportSelection): Structu
     entry.wrapper = null
     entry.node = null
   }
-
-  /* ── Geometry ─────────────────────────────────────────────────────────── */
 
   /** Straight segment between two ENDPOINTS of one band, trimmed to both marks. */
   function segmentIn(entry: PinnedCluster, link: { fromId: string, toId: string }) {
@@ -905,6 +805,13 @@ export function createStructuredFocus(viewportGroup: ViewportSelection): Structu
         const region = entry.region ?? { x: 0, y: 0, r: 0 }
         return { x: region.x, y: region.y, r: region.r }
       }
+      /*
+       * INSIGHTS are never drawn by the focus: an insight id resolves to the
+       * wheel's ORIGINAL insight-ring node, at its live displayed position —
+       * one insight layer, one source of truth.
+       */
+      const ring = insightRingLocal(entry, id)
+      if (ring) return ring
       const item = by.get(id)
       return { x: item?.x ?? 0, y: item?.y ?? 0, r: radiusOf(item) }
     }
@@ -938,9 +845,6 @@ export function createStructuredFocus(viewportGroup: ViewportSelection): Structu
     const fontSize = Math.max(eLabel.fontSize, eLabel.minVisualFontSize / cameraK)
 
     marks.leafDots.attr('cx', (d: any) => d.x).attr('cy', (d: any) => d.y).attr('r', leafR)
-    marks.insightDots.attr('cx', (d: any) => d.x).attr('cy', (d: any) => d.y)
-      .attr('r', (d: any) => radiusOf(d))
-      .attr('stroke-width', getNodeStrokeWidth('insight', cameraK))
 
     /*
      * Side-aware labels, the Unstructured convention: the name sits on the
@@ -951,14 +855,16 @@ export function createStructuredFocus(viewportGroup: ViewportSelection): Structu
     const regionX = entry.region?.x ?? 0
     const side = (d: any) => (d.x >= regionX ? 1 : -1)
     marks.labels
+      .attr('opacity', (d: any) => restingLabelOpacityOf(d))
       .attr('font-size', fontSize)
       .attr('x', (d: any) => d.x + side(d) * (leafR + eLabel.offsetX / cameraK))
       .attr('y', (d: any) => d.y)
       .attr('text-anchor', (d: any) => (side(d) > 0 ? 'start' : 'end'))
 
-    // The chip: leading dot pinned to the region centre, constant-screen.
+    // The chip: leading dot pinned to the region centre, constant-screen and
+    // drawn at the compact Structured scale (see `selection.chipScale`).
     marks.chip?.attr('transform',
-      `translate(${entry.region?.x ?? 0}, ${entry.region?.y ?? 0}) scale(${1 / cameraK})`)
+      `translate(${entry.region?.x ?? 0}, ${entry.region?.y ?? 0}) scale(${F.selection.chipScale / cameraK})`)
 
     const place = (sel: AnySelection | null) => sel
       ?.attr('x1', (d: any) => segmentIn(entry, d).x1)
@@ -1015,11 +921,9 @@ export function createStructuredFocus(viewportGroup: ViewportSelection): Structu
 
       if (!isolatedLeafId) {
         marks.leafDots.attr('opacity', F.leaf.opacity).style('pointer-events', 'auto')
-        marks.insightDots.attr('opacity', 1)
-        // Labels return to their RESTING pattern: persistent for cross-linked
-        // entities, hidden for the rest — never all-on.
-        marks.labels.attr('opacity', (d: any) =>
-          (d.labelled ? EXPANDED_CLUSTER.entityLabel.persistentOpacity : 0))
+        // Labels return to the RESTING rule: dots-only below the zoom
+        // threshold, all-on above it.
+        marks.labels.attr('opacity', (d: any) => restingLabelOpacityOf(d))
         chainFg.attr('opacity', LINK_STYLING.opacity.base)
         chainBg.attr('opacity', LINK_BACKGROUND_OPACITY)
         chainEnds.attr('opacity', LINK_STYLING.endpoints.opacity)
@@ -1029,7 +933,6 @@ export function createStructuredFocus(viewportGroup: ViewportSelection): Structu
       marks.leafDots
         .attr('opacity', (d: any) => (d.id === isolatedLeafId ? 0 : active.has(d.id) ? 1 : F.leaf.dimOpacity))
         .style('pointer-events', (d: any) => (active.has(d.id) && d.id !== isolatedLeafId ? 'auto' : 'none'))
-      marks.insightDots.attr('opacity', F.leaf.dimOpacity)
       // The clicked entity's own label hides (the chip stands in for it);
       // partners show theirs so the relationship reads by name.
       marks.labels.attr('opacity', (d: any) => (d.id === isolatedLeafId
@@ -1207,7 +1110,8 @@ export function createStructuredFocus(viewportGroup: ViewportSelection): Structu
     const group = entry.content
     const model = entry.model
     group.selectAll('*').remove()
-    const insights = entry.placed.filter(i => i.tier === 'insight')
+    // The RING's insights, by id — never placed items (the focus places none).
+    const insights = model.insights
     const leaves = entry.placed.filter(i => i.tier === 'leaf')
     const region = entry.region ?? { x: INSIGHT_X + 120, y: 0, r: 80 }
 
@@ -1221,8 +1125,10 @@ export function createStructuredFocus(viewportGroup: ViewportSelection): Structu
     const defs = group.append('defs')
     const fgId = `structured-focus-link-gradient--${model.clusterId}`
     const bgId = `structured-focus-link-bg--${model.clusterId}`
-    const rampFrom = Math.min(0, ZONE.x0, ZONE.x1)
-    const rampTo = Math.max(0, ZONE.x0, ZONE.x1)
+    // The luminous ramp spans this band's own reach: from the cluster at the
+    // origin out past the region's far edge, whichever direction that is.
+    const rampFrom = Math.min(0, region.x - region.r)
+    const rampTo = Math.max(0, region.x + region.r)
     appendUserSpaceLinkGradient(defs, fgId, rampFrom, rampTo)
     appendUserSpaceLinkGradient(defs, bgId, rampFrom, rampTo, LINK_GRADIENT.background.stops)
     // The region's glass backing blur — same construction as the Unstructured
@@ -1270,12 +1176,17 @@ export function createStructuredFocus(viewportGroup: ViewportSelection): Structu
      * Unstructured convention: external connections meet the region boundary).
      * `__cluster__` and `__region__` resolve in segmentIn.
      */
-    const chainLinks = insights.length
-      ? [
-          ...insights.map(i => ({ fromId: '__cluster__', toId: i.id, tier: 'insight' as const })),
-          ...insights.map(i => ({ fromId: i.id, toId: '__region__', tier: 'leaf' as const })),
-        ]
-      : [{ fromId: '__cluster__', toId: '__region__', tier: 'leaf' as const }]
+    /*
+     * ONE LINE PER RELATIONSHIP — and the region gets exactly ONE attachment:
+     * its own cluster. Neither insight leg is drawn by the focus layer any
+     * more: cluster↔insight already exists in the base mesh (lifted to the
+     * active emphasis by the selection pass), and an insight→region connector
+     * restated that same relationship a second way — a duplicate by another
+     * route. Insights stay visible on the ring, their base lines light up,
+     * and the region hangs off its cluster; the only other focus lines are
+     * the Entity↔Entity relations, which exist nowhere else.
+     */
+    const chainLinks = [{ fromId: '__cluster__', toId: '__region__', tier: 'leaf' as const }]
 
     const linksGroup = group.append('g').attr('class', 'structured-focus-links')
     const chain = renderStraightConnections(
@@ -1315,17 +1226,12 @@ export function createStructuredFocus(viewportGroup: ViewportSelection): Structu
       .on('mouseenter', (_event: any, l: any) => setLineState(`${l.fromId}~${l.toId}`))
       .on('mouseleave', () => setLineState(null))
 
-    // ── Insight marks — same visual language as the insight ring ──────────
-    const insightDots = group.append('g').attr('class', 'structured-focus-insights')
-      .selectAll('circle')
-      .data(insights)
-      .join('circle')
-      .attr('class', 'structured-focus-insight')
-      .attr('fill', NODE_STYLING.insight.fill)
-      .attr('stroke', NODE_STYLING.insight.stroke)
-      .attr('stroke-width', getNodeStrokeWidth('insight', cameraK))
-      .style('pointer-events', 'auto')
-    insightDots.append('title').text((d: any) => d.label)
+    /*
+     * NO insight marks here. The chain above already points at the wheel's own
+     * insight-ring nodes (see insightRingLocal) — drawing a second set was the
+     * duplication this layer must never produce. Size, yellow styling, glow,
+     * hover and tooltip all belong to the one original node.
+     */
 
     /*
      * Entity marks — the `expanded-entity`, not a lookalike: the shared token
@@ -1346,17 +1252,17 @@ export function createStructuredFocus(viewportGroup: ViewportSelection): Structu
       .on('mouseenter', function (_event: any, hovered: any) {
         if (isolatedLeafId) return
         leafDots.attr('opacity', (d: any) => (d.id === hovered.id ? 1 : F.leaf.dimOpacity))
-        // Hover reveals the name — the Unstructured contract: persistent
-        // labels belong to cross-linked entities, everyone else on demand.
+        // DOTS BY DEFAULT: only the hovered entity shows its name (unless the
+        // zoom threshold already has every label on — then hover changes
+        // nothing about the others).
         entry.marks?.labels.attr('opacity', (d: any) => (d.id === hovered.id
           ? EXPANDED_CLUSTER.entityLabel.opacity
-          : d.labelled ? EXPANDED_CLUSTER.entityLabel.persistentOpacity : 0))
+          : restingLabelOpacityOf(d)))
       })
       .on('mouseleave', () => {
         if (isolatedLeafId) return
         leafDots.attr('opacity', F.leaf.opacity)
-        entry.marks?.labels.attr('opacity', (d: any) =>
-          (d.labelled ? EXPANDED_CLUSTER.entityLabel.persistentOpacity : 0))
+        entry.marks?.labels.attr('opacity', (d: any) => restingLabelOpacityOf(d))
       })
       .on('click', (event: MouseEvent, clicked: any) => {
         event.stopPropagation()
@@ -1380,7 +1286,7 @@ export function createStructuredFocus(viewportGroup: ViewportSelection): Structu
       .attr('font-family', EXPANDED_CLUSTER.entityLabel.fontFamily)
       .attr('font-weight', EXPANDED_CLUSTER.entityLabel.fontWeight)
       .attr('fill', EXPANDED_CLUSTER.entityLabel.ink)
-      .attr('opacity', (d: any) => (d.labelled ? EXPANDED_CLUSTER.entityLabel.persistentOpacity : 0))
+      .attr('opacity', (d: any) => restingLabelOpacityOf(d))
       .style('pointer-events', 'none')
       .style('-webkit-text-stroke-color', EXPANDED_CLUSTER.entityLabel.textStroke)
       .style('-webkit-text-stroke-width', `${EXPANDED_CLUSTER.entityLabel.textStrokeWidth}px`)
@@ -1411,7 +1317,6 @@ export function createStructuredFocus(viewportGroup: ViewportSelection): Structu
 
     entry.marks = {
       leafDots,
-      insightDots,
       labels,
       chip: chipGroup,
       lineFg: chain.foreground,
@@ -1437,14 +1342,12 @@ export function createStructuredFocus(viewportGroup: ViewportSelection): Structu
     if (entries.length < 2) return
 
     // Positions in the DETAIL LAYER's frame: each band's local point plus the
-    // slot the band sits at, so a line can cross from one band to another.
+    // band's own anchor (its cluster's displayed ring position), so a line can
+    // cross from one band to another.
     const slotOf = new Map<string, { x: number, y: number }>()
     const point = new Map<string, { x: number, y: number }>()
-    entries.forEach((entry, index) => {
-      const slot = {
-        x: ANCHOR.x + PIN_X,
-        y: ANCHOR.y + slotOffsetY(index, entries.length),
-      }
+    entries.forEach((entry) => {
+      const slot = { x: entry.bandX ?? 0, y: entry.bandY ?? 0 }
       slotOf.set(entry.model.clusterId, slot)
       for (const item of entry.placed) {
         point.set(item.id, { x: slot.x + item.x, y: slot.y + item.y })
@@ -1541,15 +1444,18 @@ export function createStructuredFocus(viewportGroup: ViewportSelection): Structu
          * the same here as it does in the Unstructured drill-down. Geometry is
          * untouched: still one straight segment between two points.
          */
-        ...(entries.length > D.dashRelationsAbove
-          ? { strokeDasharray: EXPANDED_CLUSTER.entityRelation.strokeDasharray }
-          : {}),
+        /*
+         * ALWAYS dashed — the shared `entityRelation` pattern (round dots),
+         * exactly as the Unstructured drill-down draws the same relationship:
+         * a cross-cluster Entity↔Entity relation is DERIVED, so it must never
+         * borrow the solid language of ingested structure. Straight
+         * single-segment geometry unchanged.
+         */
+        strokeDasharray: EXPANDED_CLUSTER.entityRelation.strokeDasharray,
       },
     )
-    if (entries.length > D.dashRelationsAbove) {
-      relationGroup.selectAll('line')
-        .attr('stroke-linecap', EXPANDED_CLUSTER.entityRelation.strokeLinecap)
-    }
+    relationGroup.selectAll('line')
+      .attr('stroke-linecap', EXPANDED_CLUSTER.entityRelation.strokeLinecap)
   }
 
   /**
@@ -1573,21 +1479,41 @@ export function createStructuredFocus(viewportGroup: ViewportSelection): Structu
      * cross-cluster relations, and the cluster↔cluster links above). Every other
      * line in the wheel keeps its resting appearance.
      */
-    const touchesPinned = (d: any) => ids.has(representativeId(d?.sourceNode))
+    /*
+     * The selected cluster's REAL relationships stay READABLE: every drawn
+     * mesh line with a selected cluster at either representative end — its
+     * cluster↔cluster bridges and its cluster↔insight links — lifts to the
+     * hover-active emphasis instead of resting at the faint mesh level, so
+     * entering focus never hides what the cluster is actually connected to.
+     * Every other line keeps the resting look. (Nothing is ever removed.)
+     */
+    const touchesSelected = (d: any) => ids.has(representativeId(d?.sourceNode))
       || ids.has(representativeId(d?.targetNode))
-    fade(overviewConnsFg).style('opacity', (d: any) =>
-      (touchesPinned(d) ? 0 : STRUCTURED_HOVER.connection.fgBase))
-    fade(overviewConnsBg).style('opacity', (d: any) =>
-      (touchesPinned(d) ? 0 : STRUCTURED_HOVER.connection.bgBase))
+    // Relevant lines brighten; unrelated ones step DOWN from the resting mesh
+    // to the hover module's own hidden tier — reduced, never removed.
+    fade(overviewConnsFg).style('opacity', (d: any) => (touchesSelected(d)
+      ? STRUCTURED_HOVER.connection.fgActive
+      : STRUCTURED_HOVER.connection.fgHidden))
+    fade(overviewConnsBg).style('opacity', (d: any) => (touchesSelected(d)
+      ? STRUCTURED_HOVER.connection.bgActive
+      : STRUCTURED_HOVER.connection.bgHidden))
 
     /*
-     * ── RELATIONSHIP-BASED FOCUS ──────────────────────────────────────────
-     * While anything is selected, the wheel splits by the REAL relationship
-     * data: a cluster with at least one relation to a selected cluster keeps
-     * its normal active state; one with none drops to the disabled treatment —
-     * dimmed node and logo, muted label, muted satellites — visible enough for
-     * context but clearly secondary. `clustersRelated` is the same resolved
-     * relatedness every other structured feature reads (direct link, shared
+     * ── EMPHASIS, NOT REMOVAL ─────────────────────────────────────────────
+     * Selecting a cluster EMPHASIZES its network and hides nothing: every
+     * cluster, hub, insight, badge and label stays at its normal overview
+     * state (opacity 1 across the board — re-asserted here so no earlier
+     * treatment can linger). On top of that resting picture:
+     *
+     *   · the CLICKED cluster carries the strongest state — the full two-stop
+     *     neutral glow;
+     *   · clusters and insights DIRECTLY CONNECTED to it (from the same
+     *     resolved relationship data everything else reads) carry a softer
+     *     single-stop glow;
+     *   · the connection lines touching the selection are already lifted to
+     *     the hover-active opacity above.
+     *
+     * `clustersRelated` is the shared relatedness rule (direct link, shared
      * insight, shared origin, shared category), so "connected" here can never
      * disagree with the relations the drill-down draws.
      */
@@ -1595,28 +1521,52 @@ export function createStructuredFocus(viewportGroup: ViewportSelection): Structu
     const isClusterConnectedToSelectedCluster = (clusterId: string): boolean =>
       [...ids].some(selectedId =>
         selectedId !== clusterId && clustersRelated(selectedId, clusterId))
-    const activeCluster = (d: any) =>
-      isPinned(d) || isClusterConnectedToSelectedCluster(d?.id)
-    const dim = F.selection.unrelated
+    const relatedCluster = (d: any) =>
+      !isPinned(d) && isClusterConnectedToSelectedCluster(d?.id)
+
+    /** Insights DIRECTLY connected to any selected cluster, from the models. */
+    const relatedInsightIds = new Set<string>()
+    for (const entry of pinned.values()) {
+      for (const ins of entry.model.insights) relatedInsightIds.add(ins.id)
+    }
+
+    const FULL_GLOW = 'drop-shadow(0 0 8px rgba(var(--v-theme-button-white-20)))'
+      + ' drop-shadow(0 0 18px rgba(var(--v-theme-button-white-10)))'
+    /** The related tier: one soft stop — highlighted, clearly below selected. */
+    const SOFT_GLOW = 'drop-shadow(0 0 7px rgba(var(--v-theme-button-white-10)))'
 
     clusterGroups
-      .classed('cluster--active-related', (d: any) => activeCluster(d))
-      .classed('cluster--disabled-unrelated', (d: any) => !activeCluster(d))
-    fade(clusterGroups).style('opacity', (d: any) =>
-      (activeCluster(d) ? 1 : dim.nodeOpacity))
-    fade(entityCounts).style('opacity', (d: any) =>
-      (activeCluster(d) ? 1 : dim.satelliteOpacity))
+      .classed('cluster--active-related', (d: any) => isPinned(d) || relatedCluster(d))
+      .classed('cluster--disabled-unrelated', false)
+      .style('filter', (d: any) => (isPinned(d)
+        ? FULL_GLOW
+        : relatedCluster(d) ? SOFT_GLOW : null))
     /*
-     * The satellites travel with their cluster's state: full for the selected
-     * and related clusters, muted for the unrelated ones. The selected
-     * cluster's radial ring LABEL alone stays hidden — the band already
-     * carries its category, and the radial one points off into the field.
+     * Unrelated content SOFTENS to `unrelatedOpacity` (~55%) — visible, in
+     * place, clearly secondary; the selection and its network hold 100%.
+     * Positions never change and nothing is removed.
      */
-    fade(satellites).style('opacity', (d: any) =>
-      (activeCluster(d) ? 1 : dim.satelliteOpacity))
+    const soft = F.selection.unrelatedOpacity
+    const activeCluster = (d: any) => isPinned(d) || relatedCluster(d)
+    fade(clusterGroups).style('opacity', (d: any) => (activeCluster(d) ? 1 : soft))
+    fade(entityCounts).style('opacity', (d: any) => (activeCluster(d) ? 1 : soft))
+    fade(satellites).style('opacity', (d: any) => (activeCluster(d) ? 1 : soft))
+    /*
+     * The SELECTED cluster's own radial label hides while it is open — its
+     * chain and region occupy that ray, and the region already carries the
+     * category — while the node itself, its logo and its badge stay exactly
+     * as they are. Related labels hold 100%, unrelated soften.
+     */
     fade(ringLabels).style('opacity', (d: any) => (isPinned(d)
       ? 0
-      : activeCluster(d) ? 1 : dim.labelOpacity))
+      : activeCluster(d) ? 1 : soft))
+
+    // INSIGHTS, on the wheel's own nodes — original positions, never
+    // duplicated: connected ones glow at 100%, unrelated ones soften like the
+    // unrelated clusters.
+    const insightSel = viewportGroup.selectAll<SVGCircleElement, any>('circle.insight-node')
+    insightSel.style('filter', (d: any) => (relatedInsightIds.has(d?.id) ? SOFT_GLOW : null))
+    fade(insightSel).style('opacity', (d: any) => (relatedInsightIds.has(d?.id) ? 1 : soft))
 
     /*
      * ── THE SELECTED NODE STAYS ITSELF ─────────────────────────────────────
@@ -1656,6 +1606,9 @@ export function createStructuredFocus(viewportGroup: ViewportSelection): Structu
     clusterGroups
       .classed('cluster--active-related', false)
       .classed('cluster--disabled-unrelated', false)
+      .style('filter', null)
+    restore(viewportGroup.selectAll('circle.insight-node')).style('opacity', 1)
+    viewportGroup.selectAll('circle.insight-node').style('filter', null)
     restore(clusterGroups).style('opacity', 1)
     restore(satellites).style('opacity', 1)
     restore(ringLabels).style('opacity', 1)
@@ -1708,6 +1661,44 @@ export function createStructuredFocus(viewportGroup: ViewportSelection): Structu
     rotor.selectAll('image.cluster-source-icon')
       .interrupt()
       .attr('transform', `rotate(${-rotationDeg})`)
+    /*
+     * Open bands RIDE their clusters: each is anchored on its cluster's
+     * displayed ring position, so turning the wheel carries the whole band —
+     * region, entities, chain — with the node it belongs to. Content is
+     * band-local, so only the anchor transform moves (labels stay horizontal);
+     * the cross-band relation lines re-anchor from the new positions.
+     */
+    for (const entry of pinned.values()) {
+      const rad = ((entry.model.clusterAngleDeg + rotationDeg) * Math.PI) / 180
+      const x = Math.cos(rad) * STRUCTURED_RINGS.cluster
+      const y = Math.sin(rad) * STRUCTURED_RINGS.cluster
+      /*
+       * The REGION GROUP holds its ground while the wheel turns: regions are
+       * packed as one cohesive group in the viewport frame, so when a band's
+       * anchor (its cluster's displayed position) rotates, every band-local
+       * coordinate is COUNTER-TRANSLATED by the anchor's movement — absolute
+       * region and entity positions stay fixed, and only the cluster node plus
+       * its attachment line follow the roulette.
+       */
+      const shiftX = (entry.bandX ?? x) - x
+      const shiftY = (entry.bandY ?? y) - y
+      entry.bandX = x
+      entry.bandY = y
+      entry.content.interrupt('slot').attr('transform', `translate(${x}, ${y})`)
+      for (const item of entry.placed) {
+        item.x += shiftX
+        item.y += shiftY
+      }
+      if (entry.region) {
+        entry.region.x += shiftX
+        entry.region.y += shiftY
+        entry.content.selectAll('circle.expanded-region-glass, circle.expanded-region-circle')
+          .attr('cx', entry.region.x)
+          .attr('cy', entry.region.y)
+      }
+      applyGeometry(entry)
+    }
+    if (pinned.size > 1 && lastOpts) renderCrossClusterRelations(lastOpts)
   }
 
   function update(models: StructuredFocusModel[], opts: StructuredFocusRenderOptions) {
@@ -1737,32 +1728,142 @@ export function createStructuredFocus(viewportGroup: ViewportSelection): Structu
 
 
     /*
-     * ── EXTERNAL BIASES, BEFORE LAYOUT ────────────────────────────────────
-     * Cross-cluster relation pairs are derived first (the SHARED derivation the
-     * Unstructured drill-down uses), then turned into outer-annulus biases by
-     * the SHARED bias builder — so an externally-connected entity packs on the
-     * edge of its region FACING its partner's region, exactly as Unstructured
-     * places it. Region centres are known before packing because they depend
-     * only on band geometry and entity count, never on the packing itself.
+     * ── GEOMETRY FIRST: one COMPACT GROUP of regions ──────────────────────
+     *
+     * Open regions no longer scatter to their clusters' own spokes: clusters
+     * opened from opposite sides of the wheel used to put their circles at
+     * opposite corners of the canvas. Instead every open region PACKS into one
+     * cohesive group in the detail area:
+     *
+     *   · the GROUP ANCHOR sits on the mean direction of the open selections,
+     *     just past the wheel's outer extent — the same side the adaptive
+     *     camera frees up;
+     *   · the first region sits on the anchor; each next one (click order, so
+     *     earlier regions never move… within one update) takes the candidate
+     *     position touching an already-placed circle (radius + radius +
+     *     `regionGap`) that is nearest the group anchor, visited in a fixed
+     *     angular order — a deterministic greedy disc packing;
+     *   · a candidate is rejected if it enters the WHEEL's bubble (the ring
+     *     plus its labels) or leaves the viewport at the focus camera, so the
+     *     group hugs the graph without covering it.
+     *
+     * Opening another cluster re-runs the packing over the whole set, so the
+     * group re-forms cohesively rather than accreting outward forever.
      */
-    const bandH = bandHeightFor(models.length)
-    const maxByBand = Math.max((bandH - D.bandGap) / 2, 44)
-    const maxByWidth = Math.max((ZONE.x1 - INSIGHT_X - 60) / 2, 44)
-    const bandRadii = models.map(model =>
-      Math.min(getRegionRadius(model.leaves.length), maxByBand, maxByWidth))
-    // ONE placement decision, reused by the region centres, the band
-    // transforms and the pins below — they can never disagree.
-    const bandSlots = computeBandSlots(bandRadii)
-    const slotOf = (index: number) => bandSlots[index] ?? { x: 0, y: slotOffsetY(index, models.length) }
+    const dirDegOf = new Map<string, number>()
+    const radiusOfModel = new Map<string, number>()
     const regionCentreOf = new Map<string, { x: number, y: number }>()
-    models.forEach((model, index) => {
-      const r = bandRadii[index]
-      const slot = slotOf(index)
-      regionCentreOf.set(model.clusterId, {
-        x: ANCHOR.x + PIN_X + slot.x + Math.max(ZONE.x1 - r - 12, INSIGHT_X + 60 + r),
-        y: ANCHOR.y + slot.y,
-      })
+    models.forEach((model) => {
+      dirDegOf.set(model.clusterId, model.clusterAngleDeg + rotationDeg)
+      radiusOfModel.set(model.clusterId, Math.min(
+        getRegionRadius(model.leaves.length) * D.regionScale, D.maxRegionRadius))
     })
+    const cam = computeFocusCamera(models.map(m => m.clusterAngleDeg + rotationDeg))
+    const fitsViewport = (c: { x: number, y: number }, r: number) => {
+      const sx = c.x * cam.k + cam.x
+      const sy = c.y * cam.k + cam.y
+      const margin = r * cam.k + 8
+      return sx >= margin && sx <= V.dataWidth - margin
+        && sy >= margin && sy <= V.dataHeight - margin
+    }
+    /** The wheel's occupied disc — regions must stay clear of it. */
+    const wheelClear = (c: { x: number, y: number }, r: number) =>
+      Math.hypot(c.x, c.y) >= V.outerRadius + D.regionClearance * 0.5 + r
+    const placedRegions: Array<{ x: number, y: number, r: number }> = []
+    const clearOfPlaced = (c: { x: number, y: number }, r: number) =>
+      placedRegions.every(o => Math.hypot(c.x - o.x, c.y - o.y) >= r + o.r + D.regionGap)
+
+    // The group anchor: mean selection direction (falls back to East when the
+    // directions cancel), just past the wheel plus the LARGEST open radius.
+    let mx = 0
+    let my = 0
+    for (const model of models) {
+      const rad = ((dirDegOf.get(model.clusterId) ?? 0) * Math.PI) / 180
+      mx += Math.cos(rad)
+      my += Math.sin(rad)
+    }
+    const meanLen = Math.hypot(mx, my)
+    const anchorDir = meanLen > 1e-3 ? { x: mx / meanLen, y: my / meanLen } : { x: 1, y: 0 }
+    const maxR = Math.max(...models.map(m => radiusOfModel.get(m.clusterId)!))
+    const anchorDist = V.outerRadius + D.regionClearance + maxR
+    const groupAnchor = { x: anchorDir.x * anchorDist, y: anchorDir.y * anchorDist }
+
+    models.forEach((model, index) => {
+      const r = radiusOfModel.get(model.clusterId)!
+      let chosen: { x: number, y: number } | null = null
+      if (index === 0) {
+        // The first region takes the anchor itself, nudged outward only if the
+        // wheel bubble or viewport demand it.
+        for (const extra of [0, 30, 60, 90, 120, 160]) {
+          const c = {
+            x: anchorDir.x * (anchorDist + extra),
+            y: anchorDir.y * (anchorDist + extra),
+          }
+          if (wheelClear(c, r) && fitsViewport(c, r)) { chosen = c; break }
+        }
+        chosen ??= groupAnchor
+      } else {
+        /*
+         * Greedy packing: candidates touch each already-placed circle at fixed
+         * 15° steps; the survivor nearest the GROUP ANCHOR wins — which is what
+         * pulls the group together instead of stringing it out.
+         */
+        let best: { c: { x: number, y: number }, cost: number } | null = null
+        for (const placedR of placedRegions) {
+          for (let deg = 0; deg < 360; deg += 15) {
+            const rad = (deg * Math.PI) / 180
+            const dist = placedR.r + r + D.regionGap + 1
+            const c = {
+              x: placedR.x + Math.cos(rad) * dist,
+              y: placedR.y + Math.sin(rad) * dist,
+            }
+            if (!clearOfPlaced(c, r) || !wheelClear(c, r) || !fitsViewport(c, r)) continue
+            const cost = Math.hypot(c.x - groupAnchor.x, c.y - groupAnchor.y)
+            if (!best || cost < best.cost - 1e-6) best = { c, cost }
+          }
+        }
+        // No candidate satisfied everything: relax the viewport (never the
+        // overlap or the wheel), preferring nearness to the anchor.
+        if (!best) {
+          for (const placedR of placedRegions) {
+            for (let deg = 0; deg < 360; deg += 15) {
+              const rad = (deg * Math.PI) / 180
+              const dist = placedR.r + r + D.regionGap + 1
+              const c = {
+                x: placedR.x + Math.cos(rad) * dist,
+                y: placedR.y + Math.sin(rad) * dist,
+              }
+              if (!clearOfPlaced(c, r) || !wheelClear(c, r)) continue
+              const cost = Math.hypot(c.x - groupAnchor.x, c.y - groupAnchor.y)
+              if (!best || cost < best.cost - 1e-6) best = { c, cost }
+            }
+          }
+        }
+        chosen = best?.c ?? {
+          x: groupAnchor.x + index * (2 * r + D.regionGap),
+          y: groupAnchor.y,
+        }
+      }
+      placedRegions.push({ ...chosen, r })
+      regionCentreOf.set(model.clusterId, chosen)
+    })
+
+    /** A band's origin: its cluster's displayed position on the ring. */
+    const bandAnchorOf = (clusterId: string) => {
+      const rad = ((dirDegOf.get(clusterId) ?? 0) * Math.PI) / 180
+      return {
+        x: Math.cos(rad) * STRUCTURED_RINGS.cluster,
+        y: Math.sin(rad) * STRUCTURED_RINGS.cluster,
+      }
+    }
+
+    /*
+     * ── EXTERNAL BIASES, BEFORE LAYOUT ────────────────────────────────────
+     * Cross-cluster relation pairs first (the SHARED derivation the
+     * Unstructured drill-down uses), then the SHARED bias builder — so an
+     * externally-connected entity packs on the edge of its region FACING its
+     * partner's region, exactly as Unstructured places it.
+     */
     const pairGroups = models.map(model => ({
       clusterId: model.clusterId,
       entityIds: model.leaves.map(l => l.id),
@@ -1796,13 +1897,11 @@ export function createStructuredFocus(viewportGroup: ViewportSelection): Structu
     }
 
     /*
-     * Every band is rebuilt on every update, because the band HEIGHT depends on
-     * how many clusters are selected — adding a second selection re-flows the
-     * first one's field into half the area. The content is a pure function of
-     * (model, band, cameraK), so a band whose inputs did not change is redrawn
+     * Every band is rebuilt on every update. The content is a pure function of
+     * (model, ray, cameraK), so a band whose inputs did not change is redrawn
      * identically; its group, and therefore its place on screen, is untouched.
      */
-    models.forEach((model, index) => {
+    models.forEach((model) => {
       let entry = pinned.get(model.clusterId)
       if (!entry) {
         entry = {
@@ -1825,33 +1924,32 @@ export function createStructuredFocus(viewportGroup: ViewportSelection): Structu
         pinned.set(model.clusterId, entry)
       }
       entry.model = model
-      const slot = slotOf(index)
-      const slotY = ANCHOR.y + slot.y
-      const slotX = ANCHOR.x + PIN_X + slot.x
+      const anchor = bandAnchorOf(model.clusterId)
       /*
-       * ⚠️ NAMED, for the same reason the pinned node's move is: the band fades
-       * in and slides to its slot in the same pass, and two UNNAMED transitions
-       * on one element cancel each other — the slot move was killing the
-       * fade-in, leaving every band drawn at opacity 0.
+       * ⚠️ NAMED: the band fades in and takes its anchor in the same pass, and
+       * two UNNAMED transitions on one element cancel each other.
        */
       entry.content.transition('slot').duration(F.transitionMs)
-        .attr('transform', `translate(${slotX}, ${slotY})`)
-      // The band's own origin — the frame `clusterOffset` is measured in.
-      entry.bandX = slotX
-      entry.bandY = slotY
+        .attr('transform', `translate(${anchor.x}, ${anchor.y})`)
+      entry.bandX = anchor.x
+      entry.bandY = anchor.y
       entry.biases = biasesByCluster.get(model.clusterId) ?? new Map()
+      const regionAbs = regionCentreOf.get(model.clusterId)!
       const band = layoutDetail(
         model,
-        bandHeightFor(models.length),
+        {
+          x: regionAbs.x - anchor.x,
+          y: regionAbs.y - anchor.y,
+          r: radiusOfModel.get(model.clusterId)!,
+        },
         id => entry!.biases.get(id) ?? null,
       )
       entry.placed = band.placed
       entry.region = band.region
       buildContent(entry, opts)
-      // ANCHOR, not ANCHOR + PIN_X: the cluster stays on the ring's rim.
-      pinNode(entry, ANCHOR.x, slotY)
     })
 
+    lastOpts = opts
     renderCrossClusterRelations(opts)
     applySelectionHighlight(opts)
   }
@@ -1882,5 +1980,5 @@ export function createStructuredFocus(viewportGroup: ViewportSelection): Structu
     selectionLayer.remove()
   }
 
-  return { update, rescale, rotateBy, destroy }
+  return { update, rescale, rotateBy, currentRotationDeg: () => rotationDeg, destroy }
 }

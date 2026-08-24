@@ -235,18 +235,18 @@ export const GRAPH_DOCUMENT_HUBS = [
  * Never render an insight without visible confidence score.
  */
 export const GRAPH_INSIGHTS = [
-  { id: 'ins-deal-velocity', x: 460, y: 90, size: 13, confidence: 0.86, derivedFrom: '14 messages · 3 documents', timeRange: { start: 1, end: 4 } },
-  { id: 'ins-intro-path', x: 290, y: 150, size: 8, confidence: 0.74, derivedFrom: '6 messages', timeRange: { start: 1, end: 3 } },
-  { id: 'ins-cadence', x: 370, y: 190, size: 7, confidence: 0.69, derivedFrom: '9 calendar events', timeRange: { start: 2, end: 5 } },
-  { id: 'ins-valuation', x: 150, y: 300, size: 14, confidence: 0.91, derivedFrom: '21 messages · 5 documents', timeRange: { start: 1, end: 6 } },
-  { id: 'ins-runway', x: 220, y: 310, size: 12, confidence: 0.82, derivedFrom: '11 documents', timeRange: { start: 2, end: 6 } },
-  { id: 'ins-stalled', x: 480, y: 210, size: 6, confidence: 0.64, derivedFrom: '4 threads', timeRange: { start: 3, end: 5 } },
-  { id: 'ins-renewal', x: 660, y: 250, size: 5, confidence: 0.58, derivedFrom: '3 documents', timeRange: { start: 4, end: 6 } },
-  { id: 'ins-owner-gap', x: 410, y: 360, size: 9, confidence: 0.77, derivedFrom: '8 tasks', timeRange: { start: 3, end: 6 } },
-  { id: 'ins-handoff', x: 270, y: 450, size: 8, confidence: 0.71, derivedFrom: '5 meetings', timeRange: { start: 2, end: 7 } },
-  { id: 'ins-ip-risk', x: 560, y: 410, size: 10, confidence: 0.88, derivedFrom: '2 documents · 7 messages', timeRange: { start: 4, end: 7 } },
-  { id: 'ins-quiet', x: 440, y: 470, size: 6, confidence: 0.61, derivedFrom: '6 threads', timeRange: { start: 5, end: 7 } },
-  { id: 'ins-onboarding-alignment', x: 85, y: 120, size: 10, confidence: 0.79, derivedFrom: '4 documents · 2 clusters', timeRange: { start: 1, end: 4 } },
+  { id: 'ins-deal-velocity', x: 460, y: 90, size: 13, confidence: 0.86, derivedFrom: '14 messages · 3 documents', timeRange: { start: 1, end: 4 }, title: 'Deal velocity rising', description: 'Legalfab threads are moving faster than this account\'s own baseline, with replies landing inside a day.', whyItMatters: 'Deal activity is accelerating against this account\'s own recent baseline. Reply cycles have shortened and connected activity is concentrating around one opportunity, which usually precedes a decision stage rather than following it.' },
+  { id: 'ins-intro-path', x: 290, y: 150, size: 8, confidence: 0.74, derivedFrom: '6 messages', timeRange: { start: 1, end: 3 }, title: 'Warm intro path open', description: 'Two contacts already connect you to the Northwind buying group without a cold approach.', whyItMatters: 'A warm path into the buying group already exists in the graph, through people who have corresponded with both sides. Using it typically shortens first contact and avoids re-establishing context from scratch.' },
+  { id: 'ins-cadence', x: 370, y: 190, size: 7, confidence: 0.69, derivedFrom: '9 calendar events', timeRange: { start: 2, end: 5 }, title: 'Meeting cadence slipping', description: 'Recurring check-ins with this account have drifted from weekly to roughly fortnightly.', whyItMatters: 'The meeting rhythm with this account has stretched without an explicit change of plan. Cadence drift is an early, quiet indicator: it usually shows up well before the account itself goes quiet.' },
+  { id: 'ins-valuation', x: 150, y: 300, size: 14, confidence: 0.91, derivedFrom: '21 messages · 5 documents', timeRange: { start: 1, end: 6 }, title: 'Valuation framework firming', description: 'The $50M pre-money structure now appears in the SHA, the deck and the deferred-share triggers alike.', whyItMatters: 'The valuation is no longer only a proposal — the same structure now appears in the agreement, the deck and the conversion triggers. Agreement across those three is what makes the number defensible to an investor.' },
+  { id: 'ins-runway', x: 220, y: 310, size: 12, confidence: 0.82, derivedFrom: '11 documents', timeRange: { start: 2, end: 6 }, title: 'Runway assumptions shifting', description: 'Recent financial documents revise the runway projection later than the figure the deck still quotes.', whyItMatters: 'Newer financial material revises the runway later than the figure still quoted in investor-facing material. That gap matters because the two are read together in the same conversation.' },
+  { id: 'ins-stalled', x: 480, y: 210, size: 6, confidence: 0.64, derivedFrom: '4 threads', timeRange: { start: 3, end: 5 }, title: 'Thread has stalled', description: 'No reply on this thread for eleven days after a period of daily exchanges.', whyItMatters: 'A thread that ran daily has had no reply for over a week. The silence is the signal: the drop-off is sharp rather than gradual, which usually means an unanswered question rather than lost interest.' },
+  { id: 'ins-renewal', x: 660, y: 250, size: 5, confidence: 0.58, derivedFrom: '3 documents', timeRange: { start: 4, end: 6 }, title: 'Renewal risk forming', description: 'Northwind renewal signals are scattered across sources with little supporting evidence behind them.', whyItMatters: 'Renewal signals for this account appear across several sources but with thin supporting evidence behind each. Dispersed weak signals are harder to act on than a single strong one, and easier to miss entirely.' },
+  { id: 'ins-owner-gap', x: 410, y: 360, size: 9, confidence: 0.77, derivedFrom: '8 tasks', timeRange: { start: 3, end: 6 }, title: 'Owner gap on tasks', description: 'Several open items in this cluster carry no assignee and no recent activity.', whyItMatters: 'Several open items in this cluster have no assignee and no recent movement. Unowned work does not surface in anyone\'s queue, so it tends to stall silently rather than be escalated.' },
+  { id: 'ins-handoff', x: 270, y: 450, size: 8, confidence: 0.71, derivedFrom: '5 meetings', timeRange: { start: 2, end: 7 }, title: 'Handoff left incomplete', description: 'Meeting notes hand this work onward, but no follow-up thread picks it up.', whyItMatters: 'Meeting notes pass this work onward, but nothing downstream picks it up. An incomplete handoff leaves the receiving side unaware while the sending side considers it done.' },
+  { id: 'ins-ip-risk', x: 560, y: 410, size: 10, confidence: 0.88, derivedFrom: '2 documents · 7 messages', timeRange: { start: 4, end: 7 }, title: 'IP exposure to review', description: 'The transfer addendum and related messages disagree about which entity holds the rights.', whyItMatters: 'The transfer addendum and the surrounding correspondence disagree about which entity holds the rights. Ambiguity here is cheap to resolve now and expensive to resolve during diligence.' },
+  { id: 'ins-quiet', x: 440, y: 470, size: 6, confidence: 0.61, derivedFrom: '6 threads', timeRange: { start: 5, end: 7 }, title: 'Contacts gone quiet', description: 'Six threads that were previously active have had no inbound message in two weeks.', whyItMatters: 'Contacts who were previously active have stopped initiating. A drop in inbound rather than outbound is the more meaningful direction, because it reflects their attention rather than yours.' },
+  { id: 'ins-onboarding-alignment', x: 85, y: 120, size: 10, confidence: 0.79, derivedFrom: '4 documents · 2 clusters', timeRange: { start: 1, end: 4 }, title: 'Onboarding out of step', description: 'The pilot plan and the onboarding guide describe two different first-week sequences.', whyItMatters: 'The pilot plan and the onboarding guide describe different first weeks. Whichever the customer follows, the other document becomes wrong — and both are currently in circulation.' },
 ] as const
 
 /**
@@ -286,12 +286,18 @@ export const GRAPH_CONNECTIONS = [
   // Insights connect to clusters
   { source: 'Slack-s0', target: 'ins-deal-velocity' },
   { source: 'Slack-s1', target: 'ins-intro-path' },
-  { source: 'LinkedIn-s0', target: 'ins-cadence' },
+  // 'Meeting cadence slipping' re-anchored (design review): its old
+  // LinkedIn-s0 tie read as arbitrary on the canvas — Gmail's cluster ring
+  // sits nearest the insight's own position, so the line lands beside it.
+  { source: 'Gmail-s2', target: 'ins-cadence' },
   { source: 'Gmail-s0', target: 'ins-stalled' },
   { source: 'Gmail-s1', target: 'ins-owner-gap' },
   { source: 'Google Drive-s0', target: 'ins-ip-risk' },
   { source: 'WhatsApp-s0', target: 'ins-handoff' },
   { source: 'Spotify-s0', target: 'ins-quiet' },
+  // 'Runway assumptions shifting' was the one insight with NO cluster tie —
+  // it rendered as an orphan dot. LinkedIn's ring is its nearest neighbour.
+  { source: 'LinkedIn-s2', target: 'ins-runway' },
 
   // Insights can connect to multiple clusters
   { source: 'LinkedIn-s1', target: 'ins-valuation' },

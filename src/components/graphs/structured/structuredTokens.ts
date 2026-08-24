@@ -635,20 +635,30 @@ export const STRUCTURED_FOCUS = {
     glowPx: 6,
 
     /**
-     * ── RELATIONSHIP-BASED FOCUS DIM ─────────────────────────────────────
-     * While a cluster is selected, wheel clusters split by the REAL
-     * relationship data: related ones stay at their normal active state,
-     * unrelated ones drop to these values — present as context, clearly
-     * secondary, never removed. Restored in full when the selection closes.
+     * Unrelated nodes while a cluster is selected: still visible, clearly
+     * secondary — never hidden. Applied to clusters, their labels/satellites
+     * and insights with no relationship to the selection; the related tier
+     * and the selection itself stay at 1 with their glows.
      */
-    unrelated: {
-      /** The whole cluster group (circle + logo). */
-      nodeOpacity: 0.25,
-      /** Its radial category label — muted harder than the node. */
-      labelOpacity: 0.16,
-      /** Its entity summary, bridge and count badge. */
-      satelliteOpacity: 0.2,
-    },
+    unrelatedOpacity: 0.55,
+
+    /**
+     * The region chip draws SMALLER than the shared expanded-chip geometry
+     * (one uniform scale on the constant-screen transform, so padding, height
+     * and type shrink together and hug-content measurement is untouched).
+     * Structured regions carry the chip INSIDE a busy entity field; at full
+     * size it read as a banner across the circle.
+     */
+    chipScale: 0.75,
+
+    /**
+     * Camera scale at or above which an expanded region shows ALL its entity
+     * labels. Below it the region shows dots only (hover reveals one name at
+     * a time); past it there is enough screen per entity for the names to
+     * coexist. The focus base scale is ≈0.27, and each toolbar zoom step is
+     * ×1.25 — so this is roughly three zoom-ins deep.
+     */
+    entityLabelZoomThreshold: 0.5,
   },
 
   /**
@@ -680,6 +690,54 @@ export const STRUCTURED_FOCUS = {
      * scale comes from `radiusFitFraction`: the ring's radius as a fraction of
      * the viewBox's smaller side.
      */
+    /**
+     * ── SCALE-IN-PLACE FOCUS ─────────────────────────────────────────────
+     * Opening a cluster does NOT pan the radial graph anywhere: the camera
+     * stays centred on the graph's own centre and only SCALES DOWN by this
+     * factor (relative to the overview fit), so the whole ring shrinks in
+     * place and the freed margin around it is where the expanded regions
+     * open. Closing scales back up — one smooth scale animation, zero
+     * horizontal translation.
+     */
+    /*
+     * 0.7 (was 0.8): the open-state ring cedes more of the canvas to the
+     * expanded regions — the review kept finding region circles fighting the
+     * wheel for room at 0.8.
+     */
+    shrinkFactor: 0.7,
+    /**
+     * ── ADAPTIVE SHIFT ───────────────────────────────────────────────────
+     * On top of the in-place shrink, the graph slides slightly AWAY from the
+     * open selections (canvas units): a cluster clicked in the upper half
+     * shifts the ring down so its region opens into the freed upper space,
+     * and vice versa — always a two-zone composition, graph vs regions,
+     * instead of the region fighting the ring for room. Applied along the
+     * mean direction of every open selection, so opposite selections cancel
+     * to no shift. Animated by the caller's camera transition.
+     */
+    /*
+     * 200 (was 64): the ring is pushed hard toward the opposite viewport edge
+     * — clearly visible, partially cropped — so the freed side holds the
+     * expanded regions at full size instead of squeezing them into a margin.
+     */
+    adaptiveShift: 200,
+    /**
+     * Data-unit gap between the wheel's outer extent (outerRadius — the ring
+     * plus its radial labels) and the near edge of an expanded region opened
+     * beside it.
+     */
+    regionClearance: 36,
+    /**
+     * Structured regions draw LARGER than the shared count-adaptive radius:
+     * the drill-down is this mode's main read-out, and at the shared size the
+     * entities felt compressed. Applied after `getRegionRadius`, capped below.
+     */
+    regionScale: 1.3,
+    /** Hard cap on a focus region's radius (data units). */
+    maxRegionRadius: 270,
+    /** Minimum gap kept between two expanded regions (data units). */
+    regionGap: 24,
+
     wheel: {
       /*
        * Parked further past the left edge (was -0.05) so the ring is cropped

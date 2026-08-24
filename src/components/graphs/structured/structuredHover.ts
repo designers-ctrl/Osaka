@@ -47,6 +47,18 @@ export function setStructuredHoverSuspended(suspended: boolean) {
 }
 
 /**
+ * A PINNED isolation — the neighbourhood the view returns to whenever a hover
+ * ends, instead of the fully-restored resting state. Set while an Insight is
+ * SELECTED (clicked): pointer hovers still isolate what they point at, but on
+ * leave the canvas falls back to the selected insight's neighbourhood rather
+ * than lighting everything back up. Cleared with the selection.
+ */
+let pinnedIds: string | string[] | null = null
+export function setStructuredHoverPin(ids: string | string[] | null) {
+  pinnedIds = ids
+}
+
+/**
  * The VISIBLE representative id of a connection endpoint.
  *
  * Many resolved connections terminate at raw entity nodes
@@ -170,6 +182,8 @@ export function applyStructuredHoverIsolation(
   nodeId: string | string[] | null,
 ) {
   if (hoverSuspended) return
+  // A cleared hover returns to the PIN while one is set (see above).
+  if (nodeId === null && pinnedIds !== null) nodeId = pinnedIds
   /*
    * An ARRAY of ids isolates the union of their neighborhoods — the external
    * reference-highlight uses this for Source/Document hubs, which are not

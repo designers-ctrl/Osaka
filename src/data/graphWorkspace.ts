@@ -595,6 +595,9 @@ const INSIGHTS: NetworkNode[] = GRAPH_INSIGHTS
   size: insight.size,
   confidence: insight.confidence,
   derivedFrom: insight.derivedFrom,
+  title: insight.title,
+  description: insight.description,
+  whyItMatters: insight.whyItMatters,
   timeRange: insight.timeRange,
 }))
 
@@ -673,21 +676,29 @@ for (const insight of INSIGHTS) {
 }
 
 /*
- * …then normalised ACROSS THE CURRENT INSIGHT SET, not against a guessed
- * window. The demo graph's counts span a narrow band (1–3), and a fixed
- * 1–8 window would squeeze every insight into the bottom third of its size
- * range — visible variation is the whole point, so the set's own min/max
- * define the scale. `insightStrength` is 0 for the least-connected insight
- * and 1 for the most, whatever the absolute counts happen to be.
+ * …then spread by NORMALISED RANK across the current insight set, not by the
+ * raw values. The demo graph's counts span a narrow band (0–3) with heavy
+ * ties — a min/max normalisation collapsed six of ten insights onto one
+ * midband size, so variation existed in the data and never reached the
+ * screen. Ranking fixes that structurally: insights are ordered by
+ * (connectionCount, then the dataset's own `size` evidence metric, then id —
+ * fully deterministic), and `insightStrength` is the rank fraction 0…1. The
+ * weakest insight sits at exactly 0, the strongest at exactly 1, and every
+ * step in between lands on its own distinct value — the whole size window is
+ * spent, whatever the absolute counts happen to be. Within a tied
+ * connection count the evidence metric decides who reads bigger, so the
+ * ordering still tracks real weight rather than alphabet.
  */
 {
-  const counts = INSIGHTS.map(i => (i as any).connectionCount as number)
-  const lo = Math.min(...counts)
-  const hi = Math.max(...counts)
-  for (const insight of INSIGHTS) {
-    const c = (insight as any).connectionCount as number
-    ;(insight as any).insightStrength = hi === lo ? 0.5 : (c - lo) / (hi - lo)
-  }
+  const ordered = [...INSIGHTS].sort((a, b) =>
+    (((a as any).connectionCount ?? 0) - ((b as any).connectionCount ?? 0))
+    || (((a as any).size ?? 0) - ((b as any).size ?? 0))
+    || (a.id < b.id ? -1 : 1))
+  ordered.forEach((insight, index) => {
+    ;(insight as any).insightStrength = ordered.length === 1
+      ? 0.5
+      : index / (ordered.length - 1)
+  })
 }
 
 /** Build hierarchy: Source → Clusters → Entities within each cluster */

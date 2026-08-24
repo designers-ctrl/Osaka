@@ -61,6 +61,12 @@ export interface NetworkNode {
   confidence?: number
   /** What this was inferred from — the provenance line in the tooltip. */
   derivedFrom?: string
+  /** Insight headline — the hover tooltip's title. */
+  title?: string
+  /** Insight summary, one or two lines — the hover tooltip's body. */
+  description?: string
+  /** Why the insight matters — the details view's lead paragraph. */
+  whyItMatters?: string
   /** Optional source icon URL for source nodes. */
   sourceIcon?: string
   /** Timeline hour indices when this node is relevant. If undefined, always shown. */

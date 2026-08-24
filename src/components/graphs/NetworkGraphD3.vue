@@ -18,7 +18,7 @@ import { useD3Hierarchy } from './useD3Hierarchy'
 import { useD3Interaction } from './useD3Interaction'
 import { useD3Drag } from './useD3Drag'
 import { useStructuredRenderer, STRUCTURED_VIEWPORT, CLUSTER_RING, STRUCTURED_FOCUS, getStructuredClusterLabelFontSize, getStructuredClusterLabelRadius } from './structured'
-import { applyStructuredHoverIsolation } from './structured/structuredHover'
+import { applyStructuredHoverIsolation, setStructuredHoverPin } from './structured/structuredHover'
 import { resolveClusterOwnerId } from './structured/components/renderClusterRing'
 import {
   computeFocusCamera,
@@ -109,6 +109,10 @@ interface Emits {
   // leave Reset hidden while a cluster is open — this is the second input to
   // that control's visibility, not a second control.
   (e: 'focus-change', active: boolean): void
+  // An Insight node was clicked, in EITHER mode — the host opens its details.
+  (e: 'insight-click', insightId: string): void
+  /** A stationary click on empty canvas — no node, insight or region hit. */
+  (e: 'canvas-click'): void
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -464,6 +468,58 @@ function computeInitialTransform(): d3.ZoomTransform {
 // render — the base render, the dataset and the force simulation are never
 // touched. Leaving the state restores the graph exactly as it was.
 
+/*
+ * ── INSIGHT HOVER TOOLTIP ─────────────────────────────────────────────────
+ * ONE implementation for BOTH modes: `bindInsightTips` is pointed at whichever
+ * selection carries the insight circles after a render (`circle.insight-node`
+ * in Structured, the insight `circle.node-circle`s in Unstructured), so the
+ * copy, the styling and the placement rules cannot drift apart between them.
+ */
+const insightTip = ref<{ title: string, description?: string, x: number, y: number } | null>(null)
+
+/**
+ * Place the tooltip beside a hovered node, never over it, always inside the
+ * canvas: it prefers the node's right side, flips to the left when that would
+ * overflow, and its top is clamped into the container. Measured from the live
+ * boxes rather than the datum, so it is correct at any zoom or rotation.
+ */
+function showInsightTip(node: SVGGraphicsElement, datum: any) {
+  const container = containerRef.value
+  if (!container || !datum) return
+  const title = datum.title || datum.label || datum.id
+  if (!title) return
+  const box = node.getBoundingClientRect()
+  const host = container.getBoundingClientRect()
+  const GAP = 12
+  const WIDTH = 260
+  const nodeRight = box.right - host.left
+  const nodeLeft = box.left - host.left
+  // Right of the node by default; left when the tooltip would leave the canvas.
+  const x = nodeRight + GAP + WIDTH <= host.width
+    ? nodeRight + GAP
+    : Math.max(0, nodeLeft - GAP - WIDTH)
+  const y = Math.max(0, Math.min(host.height - 72, box.top - host.top + box.height / 2 - 24))
+  insightTip.value = { title, description: datum.description, x, y }
+}
+
+const hideInsightTip = () => { insightTip.value = null }
+
+/** Attach the tooltip to every insight circle in a rendered selection. */
+function bindInsightTips(root: d3.Selection<any, unknown, any, unknown>, selector: string) {
+  root.selectAll<SVGGraphicsElement, any>(selector)
+    .filter((d: any) => d?.kind === 'insight')
+    .on('mouseenter.insighttip', function (_event: MouseEvent, d: any) { showInsightTip(this, d) })
+    .on('mouseleave.insighttip', hideInsightTip)
+    // Clicking an Insight opens its details in the rail. Bound HERE, beside
+    // the tooltip, so both graph modes get the behaviour from one place.
+    .style('cursor', 'pointer')
+    .on('click.insight', (event: MouseEvent, d: any) => {
+      event.stopPropagation()
+      hideInsightTip()
+      if (d?.id) emit('insight-click', d.id)
+    })
+}
+
 /** Live node lookup for the drill-down layer (positions live on these objects). */
 function currentNodeById(): Map<string, NetworkNode> {
   return new Map((layoutNodes.value as NetworkNode[]).map(n => [n.id, n]))
@@ -501,7 +557,16 @@ function resolveHighlightNodeId(refId: string): string | null {
 
 watch(() => props.highlightRefId, (refId) => {
   if (!applyExternalHighlight) return
-  applyExternalHighlight(refId ? resolveHighlightNodeId(refId) : null)
+  const target = refId ? resolveHighlightNodeId(refId) : null
+  /*
+   * PERSISTENT while set: the structured hover module returns to this pin
+   * whenever a pointer hover ends, so a selected Insight's isolation survives
+   * the user mousing around the wheel instead of being wiped by the first
+   * hover cycle. (The unstructured bridge does the same through its own
+   * hover-clear fallback in handleNodeHover.)
+   */
+  setStructuredHoverPin(target)
+  applyExternalHighlight(target)
 })
 
 /**
@@ -810,6 +875,11 @@ function initializeVisualization(resetZoom = true) {
         target,
       )
     }
+
+    // Insight tooltip — the SAME binder, on the ring's insight marks.
+    queueMicrotask(() => {
+      if (svgRef.value) bindInsightTips(d3.select(svgRef.value) as any, 'circle.insight-node')
+    })
 
     renderStructured(svgRef.value, layoutNodes.value as any, props.links, {
       width: VIEWPORT.dataWidth,
@@ -1296,8 +1366,20 @@ function initializeVisualization(resetZoom = true) {
       applyLabelSelection(connected)
       applyIconSelection(connected)
     } else {
-      // Clear hover highlight, but keep click selection if active
-      if (selectedCluster.value) {
+      /*
+       * Clear hover — but an EXTERNAL highlight (a selected Insight, a hovered
+       * answer reference) is a pinned state, not a hover: fall back to it
+       * first, so mousing around the graph cannot wipe the insight isolation.
+       */
+      const pinnedRef = props.highlightRefId ? resolveHighlightNodeId(props.highlightRefId) : null
+      if (pinnedRef) {
+        const connected = highlightConnectedNodes(pinnedRef, allNodes, allLinks)
+        applyNodeSelection(nodes, connected)
+        applyLinkSelection(links, linksBackground, connected)
+        applyEndpointSelection(connected)
+        applyLabelSelection(connected)
+        applyIconSelection(connected)
+      } else if (selectedCluster.value) {
         const connected = highlightConnectedNodes(selectedCluster.value, allNodes, allLinks)
         applyNodeSelection(nodes, connected)
         applyLinkSelection(links, linksBackground, connected)
@@ -1317,6 +1399,9 @@ function initializeVisualization(resetZoom = true) {
 
   // The reference-highlight seam takes the SAME path a pointer hover takes.
   applyExternalHighlight = id => handleNodeHover(id, layoutNodes.value as any, linkData)
+
+  // Insight tooltip — the shared binder, on this mode's insight circles.
+  bindInsightTips(svg as any, 'circle.node-circle')
 
   setupNodeInteraction(
     nodes,
@@ -1809,6 +1894,15 @@ function initializeVisualization(resetZoom = true) {
   // otherwise dragging the canvas would close the focused view.
   svg.on('pointerdown.drilldown', (event: PointerEvent) => {
     canvasPointerDownAt = { x: event.clientX, y: event.clientY }
+  })
+  // A stationary click on EMPTY canvas, in either mode: the host uses it to
+  // clear a selected Insight (any non-insight click exits insight-details).
+  // Node/insight/region handlers all stopPropagation, so only true canvas
+  // clicks arrive here; the pointer-travel guard keeps pans from counting.
+  svg.on('click.canvasclear', (event: MouseEvent) => {
+    const from = canvasPointerDownAt
+    if (from && Math.hypot(event.clientX - from.x, event.clientY - from.y) > 4) return
+    emit('canvas-click')
   })
   svg.on('click.drilldown', (event: MouseEvent) => {
     if (expandedClusterIds.value.length === 0) return
@@ -2473,14 +2567,29 @@ function applyStructuredFocus() {
    * Scroll and drag are re-bound to turning the wheel instead (below).
    */
   structuredFocusHandle ??= createStructuredFocus(viewportG as any)
-  if (wasClosed && zoomBehaviorInstance) {
-    const camera = computeFocusCamera()
-    svg.transition().duration(STRUCTURED_FOCUS.rotationMs)
+  /*
+   * ADAPTIVE CAMERA, on every selection change: the graph shrinks in place and
+   * slides a bounded step AWAY from the open selections' mean direction (their
+   * displayed spoke angles — ring angle plus the current roulette rotation),
+   * so a cluster clicked in the upper half pushes the ring down and its region
+   * opens into the freed space. One smooth transition per change; pan/zoom
+   * stay handed to the roulette while open (rebound once, on opening).
+   */
+  const rouletteDeg = structuredFocusHandle.currentRotationDeg()
+  const camera = computeFocusCamera(models.map(m => m.clusterAngleDeg + rouletteDeg))
+  if (zoomBehaviorInstance) {
+    const move = svg.transition().duration(STRUCTURED_FOCUS.rotationMs)
       .call(zoomBehaviorInstance.transform as any, camera)
-      .on('end', () => bindRouletteControls(svg))
+    /*
+     * ⛔ NO ROULETTE CONTROLS. The cluster ring stays SPATIALLY FIXED while a
+     * cluster is selected: nothing rotates it, and scroll/drag are left to the
+     * camera, so zoom and pan keep working exactly as they do in the overview.
+     * (`bindRouletteControls` used to take the canvas over here, swapping the
+     * camera for a spin gesture — see the note on that function.)
+     */
   }
   structuredFocusHandle.update(models, {
-    cameraK: computeFocusCamera().k,
+    cameraK: camera.k,
     insightFill: chartTheme.value?.categorical?.[0] || '#F2C585',
     insightStroke: NODE_STYLING.insight.stroke,
     // The identical expression the drill-down passes as its `entityColor`, so a
@@ -2509,6 +2618,7 @@ function applyStructuredFocus() {
  * Bound in the `.zoom`-free namespaces below so releasing them cannot disturb
  * anything else listening on the canvas.
  */
+// eslint-disable-next-line @typescript-eslint/no-unused-vars -- kept, not bound: see above
 function bindRouletteControls(svg: d3.Selection<SVGSVGElement, unknown, any, unknown>) {
   if (!zoomBehaviorInstance) return
   // Off with the camera: no pan, no zoom, no double-click-to-zoom.
@@ -2735,10 +2845,82 @@ defineExpose({
       class="network-graph-d3__canvas"
       :class="{ 'network-graph-d3__canvas--edge-fade': structuredFocusActive }"
     />
+
+    <!--
+      INSIGHT TOOLTIP — one element, both graph modes. It lives here rather
+      than in the SVG because it borrows the InsightCard's material (a gold
+      hairline over a translucent wash), which is CSS, not SVG paint.
+
+      Decorative and inert: `pointer-events: none`, so it can never steal the
+      hover that summoned it or block a node underneath.
+    -->
+    <div
+      v-if="insightTip"
+      class="insight-tip"
+      :style="{ left: `${insightTip.x}px`, top: `${insightTip.y}px` }"
+      role="tooltip"
+      aria-hidden="true"
+    >
+      <p class="insight-tip__title text-label-large">{{ insightTip.title }}</p>
+      <p v-if="insightTip.description" class="insight-tip__body text-body-small">
+        {{ insightTip.description }}
+      </p>
+    </div>
   </div>
 </template>
 
 <style scoped>
+/*
+ * ── THE INSIGHT TOOLTIP ───────────────────────────────────────────────────
+ * The InsightCard's language at graph scale: the same gold hairline and the
+ * same right-to-left wash over the page ground, only compact — this is a
+ * pointer read-out, not a card. Positioned by the component from the hovered
+ * node's own box (see `showInsightTip`), which is what keeps it beside the
+ * node, clear of it, and inside the canvas.
+ */
+.insight-tip {
+  position: absolute;
+  z-index: 4;
+  max-width: 260px;
+  padding: 8px 10px;
+  border-radius: var(--radius-md);
+  border: 1px solid rgb(var(--v-theme-primary));
+  background:
+    linear-gradient(
+      270deg,
+      rgb(var(--v-theme-background)) 0%,
+      rgba(var(--v-theme-secondary), 0.55) 100%
+    ),
+    rgb(var(--v-theme-background));
+  box-shadow: 0 0 12px 0 rgba(var(--v-theme-primary), 0.22);
+  pointer-events: none;
+}
+
+/* Title leads; the description is its caption. */
+.insight-tip__title {
+  margin: 0;
+  color: rgba(var(--v-theme-button-white-100));
+  font-weight: 500;
+}
+
+/*
+ * Clamped to TWO lines: the tooltip is a pointer read-out at a fixed size, so
+ * a longer description is cut with an ellipsis rather than allowed to grow the
+ * box. `-webkit-line-clamp` is the clamp (still the prefixed form everywhere
+ * that matters, with the standard `line-clamp` alongside for browsers that
+ * have moved on); the title above is never clamped.
+ */
+.insight-tip__body {
+  margin: 2px 0 0;
+  color: rgba(var(--v-theme-button-white-80));
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /*
  * The container carries the dot grid so the tile is measured in screen pixels
  * and stays the same size at every viewport width. Drawing it inside the <svg>

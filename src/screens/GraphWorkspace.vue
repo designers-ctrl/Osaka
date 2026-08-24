@@ -45,6 +45,8 @@ import AssistantThoughtToggle from '@/components/AssistantThoughtToggle.vue'
 import AssistantAccordion from '@/components/AssistantAccordion.vue'
 import AnswerProse from '@/components/AnswerProse.vue'
 import AssistantAnswer from '@/components/AssistantAnswer.vue'
+import InsightDetails from '@/components/InsightDetails.vue'
+import { deriveInsightDetail } from '@/data/insightDetail'
 import AssistantRailToggle from '@/components/AssistantRailToggle.vue'
 import AppTabSegments from '@/components/AppTabSegments.vue'
 import ProfileMenu from '@/components/ProfileMenu.vue'
@@ -542,6 +544,32 @@ const zoomLabel = computed(() => `${Math.round(zoom.value * 100)}%`)
  */
 const answerHighlightId = ref<string | null>(null)
 
+/**
+ * The Insight whose details the rail is showing, or null. Clicking an Insight
+ * in EITHER graph mode opens it here and replaces whatever was open; the graph
+ * keeps it highlighted for as long as it stays open, through the same
+ * `highlight-ref-id` seam the answer's inline references use — one isolation
+ * mechanism, not a second one.
+ */
+const selectedInsightId = ref<string | null>(null)
+const insightDetail = computed(() =>
+  selectedInsightId.value ? deriveInsightDetail(selectedInsightId.value) : null)
+
+function openInsight(insightId: string) {
+  // Clicking another insight switches DIRECTLY — same state, new id.
+  selectedInsightId.value = insightId
+}
+
+/**
+ * Leave insight-details: the canvas isolation clears (highlight-ref-id goes
+ * null) and the rail's stack falls back to the SAME default dashboard state
+ * the page opened with — the template's v-if chain re-renders it from
+ * `data.railSummary`, so nothing is duplicated to restore it.
+ */
+function closeInsight() {
+  selectedInsightId.value = null
+}
+
 function onAnswerRef(refId: string) {
   const node = data.nodes.find(n => n.id === refId)
   // No destination yet (entity-level names like "DDA logic"): the component
@@ -573,6 +601,9 @@ function onAnswerAction(id: 'copy' | 'like' | 'dislike' | 'update') {
 }
 
 function handleClusterClick(nodeId: string) {
+  // Any non-insight click exits insight-details: the rail returns to its
+  // default content and the canvas sheds the insight isolation.
+  closeInsight()
   selectedCluster.value = nodeId
   // Clusters no longer stand in for a route: clicking one opens the canvas's
   // own drill-down, reported separately through `cluster-expand` below. Only
@@ -605,6 +636,7 @@ function handleExpandLimit(max: number) {
 }
 
 function handleClusterExpand(clusterId: string | null) {
+  if (clusterId) closeInsight()
   expandedClusterId.value = clusterId
   if (!clusterId) return
   const cluster = data.nodes.find(n => n.id === clusterId) as { category?: string } | undefined
@@ -933,12 +965,14 @@ onBeforeUnmount(() => {
           :user-initials="data.user.initials"
           :sentiment-percent="sentimentPercent"
           :sentiment-label="data.sentiment.label"
-          :highlight-ref-id="answerHighlightId"
+          :highlight-ref-id="answerHighlightId ?? selectedInsightId"
           @cluster-click="handleClusterClick"
           @cluster-expand="handleClusterExpand"
+          @canvas-click="closeInsight"
           @expand-limit="handleExpandLimit"
           @viewport-change="viewportChanged = !$event"
           @focus-change="structuredDetailOpen = $event"
+          @insight-click="openInsight"
         />
         <!-- The canvas summary in text, for keyboard and screen-reader users. -->
         <p class="d-sr-only">{{ graphSummary }}</p>
@@ -1310,7 +1344,9 @@ onBeforeUnmount(() => {
                   `.app-button--m` size rule sets 14/400 and outranks an unlayered utility on
                   the same element, so the class only takes effect one level in.
                 -->
-                <span class="rail__conversation-title text-title-large text-left text-truncate">{{ activeConversation.title }}</span>
+                <!-- While insight-details is open the header names the MODE, not the
+                     conversation — restored the moment the details close. -->
+                <span class="rail__conversation-title text-title-large text-left text-truncate">{{ insightDetail ? 'Insight Details' : activeConversation.title }}</span>
                 <template #rightIcon><v-icon icon="chevronDown" /></template>
               </AppButton>
             </template>
@@ -1344,7 +1380,22 @@ onBeforeUnmount(() => {
             Swapped wholesale for the chat below; the header above and the
             composer underneath sit OUTSIDE this stack, so neither is touched.
           -->
-          <template v-if="!chatActive">
+          <!--
+            INSIGHT DETAILS — what the stack shows while an Insight is
+            selected on the canvas. It replaces the dashboard (and the chat)
+            for as long as it is open; the header above and the composer below
+            sit OUTSIDE this stack, so neither is touched.
+          -->
+          <template v-if="insightDetail">
+            <InsightDetails
+              :detail="insightDetail"
+              @ref-click="onAnswerRef"
+              @ref-hover="answerHighlightId = $event"
+              @chart-menu="notify('Chart options')"
+            />
+          </template>
+
+          <template v-else-if="!chatActive">
             <!--
               THE RAIL AT REST: one reading of the whole graph, and the three
               counts behind it. The previous dashboard cards (memory growth,

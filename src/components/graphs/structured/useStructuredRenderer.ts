@@ -274,6 +274,26 @@ export function useStructuredRenderer() {
       renderClusterRing(rotor as any, clusterNodes, linkSet, {centerX: 0, centerY: 0, zoom: config.zoom, chartTheme: config.chartTheme, onClusterClick: config.onClusterClick})
     }
 
+    /*
+     * ── ONE CLICK TARGET PER CLUSTER ─────────────────────────────────────
+     * The whole cluster REPRESENTATION opens the drill-down, not just the
+     * node: its count badge and its entity summary both carry the cluster's
+     * own datum (bound exactly for per-cluster treatments like this), so both
+     * route to the SAME `onClusterClick` the node uses — one handler, three
+     * surfaces. `stopPropagation` keeps the click from also reaching the
+     * canvas (which would read it as an empty-canvas click and clear
+     * selections), and binding one namespaced handler per GROUP root means a
+     * click inside can never bubble into a second trigger.
+     */
+    if (config.onClusterClick) {
+      rotor.selectAll<SVGGElement, any>('g.cluster-entity-badge, g.entity-summary-group')
+        .style('cursor', 'pointer')
+        .on('click.clusteropen', (event: MouseEvent, d: any) => {
+          event.stopPropagation()
+          if (d?.id) config.onClusterClick?.(d.id)
+        })
+    }
+
     // Center ring LAST: the fully opaque avatar must cover any line that
     // passes through the middle of the graph.
     const sourceNodes = nodesByKind.get('source') || []

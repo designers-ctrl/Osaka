@@ -98,14 +98,32 @@ defineEmits<{
     :option="option"
     :init-options="{ renderer: 'svg' }"
     :update-options="{ notMerge: true }"
-    :style="{ height: `${height}px` }"
     autoresize
     @click="(params: unknown) => $emit('chart-click', params as Record<string, unknown>)"
   />
 </template>
 
 <style scoped>
+/*
+ * ── THE PLOT BOX IS FIXED ─────────────────────────────────────────────────
+ * Every chart in the kit renders into the SAME 280px-tall box: responsive in
+ * width, immovable in height. The height used to come from a `height` prop
+ * written as an inline style, which meant a chart's box could differ per call
+ * site and shift as surrounding content reflowed.
+ *
+ * ⚠️ SELECTOR: vue-echarts renders a CUSTOM ELEMENT, `<x-vue-echarts>`, whose
+ * class is `echarts cly-chart` — there is no `.x-vue-echarts` CLASS to match,
+ * so the rule targets the element name (and this component's own class, which
+ * sits on the same node). `:deep` because the element is vue-echarts' root,
+ * not one this component writes.
+ *
+ * `autoresize` (above) keeps the canvas in step with the box, so the chart
+ * re-lays out to the new width without the box ever changing height.
+ */
+:deep(x-vue-echarts),
 .cly-chart {
   width: 100%;
+  height: 280px;
+  max-height: 280px;
 }
 </style>

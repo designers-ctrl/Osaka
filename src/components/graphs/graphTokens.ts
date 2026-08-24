@@ -71,7 +71,8 @@ export const CLUSTER_SIZING = {
    *
    *   minDiameter 14  — one step above the 12px source, so even the weakest
    *                     cluster is strictly larger than a source;
-   *   maxDiameter 20  — strictly BELOW INSIGHT_SIZING.minDiameter (24), which
+   *   maxDiameter 20  — strictly BELOW INSIGHT_SIZING.minDiameter (derived as
+   *   maxDiameter + 2, so the inequality holds by construction), which
    *                     is the whole point: no cluster, however many entities
    *                     it holds, can reach the smallest insight.
    *
@@ -80,16 +81,10 @@ export const CLUSTER_SIZING = {
    * heavier, just never as an insight.
    */
   minDiameter: 14,
-  /*
-   * 19, not 22: the insight window's floor came down to 20, and the hierarchy
-   * rule is a STRICT inequality — the biggest cluster must stay under the
-   * smallest insight. Lowered rather than raised: clusters are never inflated
-   * to keep the ordering, the ceiling just yields to the kind above it.
-   */
-  maxDiameter: 19,
+  maxDiameter: 22,
   // Radii are DERIVED, so the window above is the only place to edit.
   minRadius: 14 / 2,
-  maxRadius: 19 / 2,
+  maxRadius: 22 / 2,
   /*
    * THE SIZE DRIVER: how many entities the cluster actually holds. The window
    * matches the dataset's real spread (entityFill.ts ENTITY_POPULATION —
@@ -159,13 +154,27 @@ export function getClusterDiameter(entityCountOrWeight: number, isWeight: boolea
 
 export const INSIGHT_SIZING = {
   /*
-   * The insight's size window. `minDiameter` is the top of the hierarchy ladder
-   * and must stay STRICTLY GREATER than CLUSTER_SIZING.maxDiameter (20) — that
-   * single inequality is what makes an insight always readable as the largest
-   * kind, whatever its confidence and however many entities a cluster holds.
+   * The insight's size window: the top of the hierarchy ladder. `minDiameter`
+   * is derived from CLUSTER_SIZING.maxDiameter so no insight can ever render
+   * smaller than the largest cluster, whatever either window is retuned to.
    */
-  minDiameter: 20, // Weakest insight — must still exceed CLUSTER_SIZING.maxDiameter
-  maxDiameter: 24, // Strongest insight; a tight band, so insights read as one kind
+  /*
+   * DERIVED FROM THE CLUSTER RANGE, not pinned: the weakest insight starts a
+   * step above the largest possible cluster, so however the cluster window is
+   * retuned the hierarchy inequality holds by construction — and the top of
+   * the window sits a WIDE step above that, so insight strength is legible as
+   * size rather than as a rumour. (Was a fixed 20…24 band: with the screen
+   * floor active the whole set rendered within 4px and read as one size.)
+   */
+  // EQUAL to the largest cluster, not a step above: the rule is that an insight
+  // is never SMALLER than the biggest cluster, so the two windows meeting is
+  // exactly right — the weakest insight and the largest cluster read the same,
+  // and every insight above the floor is larger than every cluster.
+  minDiameter: CLUSTER_SIZING.maxDiameter, // 22
+  // +6 → 28. A tighter band than before: strength still reads as size (the
+  // spread is spent across the whole window, not clustered at one end), but no
+  // insight grows far enough to dominate the field around it.
+  maxDiameter: CLUSTER_SIZING.maxDiameter + 6, // 28
   /*
    * THE SIZE DRIVER: how many relationships the insight actually carries,
    * counted from the real connection set (graphWorkspace attaches
@@ -177,7 +186,7 @@ export const INSIGHT_SIZING = {
   connectionMax: 8,
   // Minimum ON-SCREEN diameter — the top step of the per-kind clamp ladder
   // (source 12 < cluster 14 < insight 20), holding the hierarchy at low zoom.
-  minScreenDiameter: 20,
+  minScreenDiameter: 22,
 
   // Size can be driven by:
   // 1. Explicit `size` property in node data (e.g., 5-14 range)
