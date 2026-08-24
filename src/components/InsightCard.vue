@@ -76,7 +76,12 @@
   pointer-events: none;
 }
 
-/* The glowing Insight mark: the graph's gold on its own lit disc. */
+/*
+ * The glowing Insight mark. The disc is EXACTLY the graph Insight fill —
+ * `button-outlined-accent-1`, the same token NODE_STYLING.insight.fill
+ * mirrors (Yellow/Accent 1) — not a separate icon background. The glyph
+ * renders on top in the token's derived on- color, centered by the flexbox.
+ */
 .insight-card__icon {
   position: relative;
   flex-shrink: 0;
@@ -86,12 +91,8 @@
   width: 28px;
   height: 28px;
   border-radius: 50%;
-  color: rgb(var(--v-theme-primary));
-  background: radial-gradient(
-    50% 50% at 50% 50%,
-    rgba(var(--v-theme-primary), 0.35) 0%,
-    rgba(var(--v-theme-primary), 0.08) 100%
-  );
+  color: rgb(var(--v-theme-on-button-outlined-accent-1));
+  background: rgb(var(--v-theme-button-outlined-accent-1));
   box-shadow: 0 0 12px 2px rgba(var(--v-theme-primary), 0.35);
 }
 

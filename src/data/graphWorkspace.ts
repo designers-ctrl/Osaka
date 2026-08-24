@@ -24,6 +24,7 @@
 
 import type { NetworkLink, NetworkNode } from '@/components/charts'
 import { entityLabelFor, entityPopulationTarget } from './entityFill'
+import { withoutDisallowedLinks } from './graphLinkRules'
 // The three logos that lead the stacked avatars. These ship as PNGs (the rest of
 // the marks are SVG) and already carry their own coloured disc, which is why the
 // avatar renders them full-bleed rather than on a tinted background.
@@ -330,7 +331,15 @@ export interface GraphWorkspaceData {
  */
 export interface RailSummary {
   title: string
-  body: string
+  /**
+   * The summary paragraph as ordered inline runs — the SAME rich-text shape
+   * the assistant answer uses, so names of real graph items (sources,
+   * documents, clusters, entities) carry a `refId` and render as interactive
+   * references with the answer's own hover-isolation behaviour. Only names
+   * that resolve to an actual node id are marked; everything else stays a
+   * plain string run.
+   */
+  body: AnswerRichText
   kpis: RailKpi[]
 }
 
@@ -378,12 +387,6 @@ export interface DemoReasoningStep {
   }>
   /** Expanded on first render — the demo state the reference screenshot shows. */
   defaultOpen?: boolean
-  /**
-   * Nested sub-steps — rendered as accordions INSIDE this step's panel (the
-   * decomposition step parents its three sub-questions). One level only, and
-   * every child starts collapsed; each child has the same items vocabulary.
-   */
-  children?: DemoReasoningStep[]
 }
 
 export interface DemoAnswer {
@@ -635,6 +638,9 @@ const getValidConnections = (): NetworkLink[] => {
 
       return sourceExists && targetExists
     })
+    // ⛔ Insight ↔ Insight is not a relationship this graph can assert — the
+    // rule, not the fixture, decides (src/data/graphLinkRules.ts).
+    .filter(conn => !(conn.source.startsWith('ins-') && conn.target.startsWith('ins-')))
     .map(conn => ({
       source: conn.source,
       target: conn.target,
@@ -643,6 +649,46 @@ const getValidConnections = (): NetworkLink[] => {
 }
 
 const NAMED_LINKS: NetworkLink[] = getValidConnections()
+
+/*
+ * ── INSIGHT STRENGTH, FROM THE REAL GRAPH ────────────────────────────────
+ * How many relationships each insight actually carries — counted from the
+ * connection set just built, not from a hand-authored number. This is what
+ * drives an insight's rendered radius in BOTH modes (getInsightRadius in
+ * graphTokens.ts): an insight joining many clusters/sources reads bigger than
+ * one hanging off a single thread.
+ *
+ * Deterministic by construction: the same links produce the same counts on
+ * every load, and the value is attached once here so every renderer reads one
+ * number instead of re-deriving its own.
+ */
+for (const insight of INSIGHTS) {
+  let connections = 0
+  for (const link of NAMED_LINKS) {
+    const sourceId = typeof link.source === 'object' ? (link.source as any)?.id : link.source
+    const targetId = typeof link.target === 'object' ? (link.target as any)?.id : link.target
+    if (sourceId === insight.id || targetId === insight.id) connections++
+  }
+  ;(insight as any).connectionCount = connections
+}
+
+/*
+ * …then normalised ACROSS THE CURRENT INSIGHT SET, not against a guessed
+ * window. The demo graph's counts span a narrow band (1–3), and a fixed
+ * 1–8 window would squeeze every insight into the bottom third of its size
+ * range — visible variation is the whole point, so the set's own min/max
+ * define the scale. `insightStrength` is 0 for the least-connected insight
+ * and 1 for the most, whatever the absolute counts happen to be.
+ */
+{
+  const counts = INSIGHTS.map(i => (i as any).connectionCount as number)
+  const lo = Math.min(...counts)
+  const hi = Math.max(...counts)
+  for (const insight of INSIGHTS) {
+    const c = (insight as any).connectionCount as number
+    ;(insight as any).insightStrength = hi === lo ? 0.5 : (c - lo) / (hi - lo)
+  }
+}
 
 /** Build hierarchy: Source → Clusters → Entities within each cluster */
 // Only create clusters for relevant sources (those with at least 1 cluster)
@@ -661,10 +707,29 @@ const rings = [
     'Requests', 'Services', 'Links', 'Attachments', 'Workflows',
   ]
 
+  /*
+   * ── ONE NAME PER CLUSTER, WITHIN A SOURCE ────────────────────────────────
+   *
+   * RULE: clusters belonging to the same Source must never share a display
+   * name. A hash alone does not give that — with 15 categories and a dozen
+   * clusters per source, collisions are the norm, and a source showing
+   * "Decisions" five times reads as five copies of one thing rather than five
+   * distinct clusters.
+   *
+   * So the hash picks a PREFERRED category and the assignment then walks the
+   * list from there to the first name this source has not used yet. Sources are
+   * independent: two different sources may both have a "Decisions", which is
+   * correct — the rule is about siblings, not about the graph.
+   *
+   * Fully deterministic: same ids in, same names out, on every reload — the hash
+   * seeds it and the walk is ordered, with no `Math.random()` anywhere (a house
+   * rule; it re-scrambled the graph on every load).
+   */
+  const usedCategories = new Set<string>()
+
   clusterRing.nodes.forEach((node, idx) => {
     node.timeRange = { start: idx % 3 + 1, end: Math.min(7, idx % 3 + 4) }
     // ID-seeded hash → stable/deterministic weight and category across reloads
-    // (Math.random() is banned here — it re-scrambled cluster sizes every load)
     const clusterId = node.id
     let hash = 0
     for (let j = 0; j < clusterId.length; j++) {
@@ -673,9 +738,28 @@ const rings = [
     // Add weight (0-100) for variable cluster sizing (from config)
     ;(node as any).weight = Math.floor(GRAPH_CLUSTER_CONFIG.weightMin + (hash / 1000) * (GRAPH_CLUSTER_CONFIG.weightMax - GRAPH_CLUSTER_CONFIG.weightMin))
 
-    // TODO: Add deterministic semantic category (mock, pending real AI-derived cluster categorization)
-    const categoryIndex = Math.floor((hash / 1000) * SEMANTIC_CATEGORIES.length)
-    ;(node as any).category = SEMANTIC_CATEGORIES[categoryIndex]
+    // TODO: mock categorisation, pending real AI-derived cluster categories.
+    const preferred = Math.floor((hash / 1000) * SEMANTIC_CATEGORIES.length)
+    let category = ''
+    for (let step = 0; step < SEMANTIC_CATEGORIES.length && !category; step++) {
+      const candidate = SEMANTIC_CATEGORIES[(preferred + step) % SEMANTIC_CATEGORIES.length]
+      if (!usedCategories.has(candidate)) category = candidate
+    }
+    /*
+     * A source with more clusters than there are categories still has to end up
+     * with distinct names, so the preferred one is qualified — "People 2",
+     * "People 3". The base word stays first, which is what the entity name pools
+     * key off (entityFill.ts strips the qualifier), so a qualified cluster still
+     * fills with the right kind of names.
+     */
+    if (!category) {
+      const base = SEMANTIC_CATEGORIES[preferred]
+      let suffix = 2
+      while (usedCategories.has(`${base} ${suffix}`)) suffix++
+      category = `${base} ${suffix}`
+    }
+    usedCategories.add(category)
+    ;(node as any).category = category
   })
 
   // Create entities within each cluster
@@ -754,6 +838,265 @@ const rings = [
     ],
   }
 })
+
+/*
+ * ── CROSS-GROUP CLUSTER ↔ CLUSTER RELATIONSHIPS ────────────────────────────
+ *
+ * Every Source/Document GROUP (a hub plus its surrounding clusters) takes part
+ * in at least one Cluster↔Cluster relationship with a cluster from ANOTHER
+ * group, so the Unstructured graph reads as one loose connected network rather
+ * than isolated islands.
+ *
+ * These are REAL dataset links, not decorative render-only lines: they ride the
+ * same `links` array as everything else, so the force simulation (which already
+ * classifies a cluster↔cluster link between two groups as `crossGroup`, with
+ * its own distance and strength), hover isolation, endpoint dots and timeline
+ * filtering all treat them exactly like any other relationship.
+ *
+ * ── THE LAYOUT RULE ────────────────────────────────────────────────────────
+ *
+ * A connector must not cut through a cluster GROUP. Concretely, a candidate
+ * segment is rejected while a clean alternative exists if it:
+ *
+ * - enters the BUBBLE of any group it does not terminate in — the disc around
+ *   a hub that holds its whole cluster ring (`bubbleRadius` below), which also
+ *   keeps lines out of the hub's own circle and its labels' neighbourhood;
+ * - passes within `CROSS_LINK_CLEARANCE` of any individual node (source,
+ *   document, cluster, insight) that is not one of its own endpoints;
+ * - crosses a cross-group segment already accepted.
+ *
+ * And a candidate may only START from a FACING cluster: one on the side of its
+ * group that looks toward the partner hub. A far-side cluster would send the
+ * line across its own group's bubble — the exact "line runs over a cluster
+ * group" artifact this rule exists to remove.
+ *
+ * ── HOW THE PAIRS ARE CHOSEN — deterministic, geometry-driven ──────────────
+ *
+ * 1. Kruskal's spanning tree over hub pairs, nearest first: an edge is taken
+ *    when it joins two still-separate components AND it has a clean candidate
+ *    (no bubble hits, no node obstructions, no crossings). A blocked pair is
+ *    simply SKIPPED and connectivity is found through the next-nearest pair —
+ *    this is the "reject or reroute" step: the tree routes around geometry it
+ *    cannot cross cleanly. Only if a full pass leaves components unmerged does
+ *    a relaxed pass accept the least-blocked remaining pair, because one
+ *    imperfect line still beats an island.
+ * 2. For each accepted pair, candidates are the two groups' facing clusters,
+ *    ranked by strict priority: fewest bubble hits, fewest node obstructions,
+ *    fewest crossings with accepted segments, shortest, id order.
+ *
+ * Evaluated on the dataset's SEED positions — the same numbers everything else
+ * derives from — so the result is stable across reloads (`Math.random()` is
+ * banned in graph data). Straight single segments, like every connection.
+ */
+const CROSS_LINK_CLEARANCE = 34
+/** Extra margin past a group's cluster orbit for its "occupied bubble". */
+const GROUP_BUBBLE_MARGIN = 16
+
+/**
+ * DESIGN-REVIEWED ENDPOINT PINS, keyed by sorted hub-pair. The generator's
+ * geometry runs on SEED positions, but the force simulation settles the layout
+ * differently — and the review flagged one case where a seed-clean link landed
+ * across a cluster after settling: the Legalfab "People" line into Google
+ * Drive's "Decisions" (Google Drive-s5), which sat under the settled line. The
+ * designer's fix: that hub pair connects through Google Drive's "Projects"
+ * (Google Drive-s0) instead. Pins are validated like any candidate; remove one
+ * if its hubs stop pairing.
+ */
+const CROSS_LINK_PINS: Record<string, [string, string]> = {
+  'Google Drive~doc-legalfab': ['Google Drive-s0', 'doc-legalfab-s4'],
+}
+
+const CROSS_GROUP_CLUSTER_LINKS: NetworkLink[] = (() => {
+  const hubs = [...RELEVANT_SOURCES, ...DOCUMENT_HUBS]
+    .map(h => ({ id: h.id, x: h.x, y: h.y, radius: h.radius }))
+    .sort((a, b) => (a.id < b.id ? -1 : 1))
+  if (hubs.length < 2) return []
+
+  const clusterNodes = rings.flatMap(r => r.nodes).filter(n => n.kind === 'cluster')
+  const clustersOf = (hubId: string) =>
+    clusterNodes.filter(n => n.id.replace(/-s\d+$/, '') === hubId)
+  // Every individual node a cross-link must steer around (endpoints excluded
+  // per pair).
+  const obstacles = [
+    ...hubs,
+    ...clusterNodes,
+    ...INSIGHTS,
+  ].map(n => ({ id: n.id, x: n.x ?? 0, y: n.y ?? 0 }))
+
+  type Pt = { x: number, y: number }
+  const dist2 = (a: Pt, b: Pt) => (a.x - b.x) ** 2 + (a.y - b.y) ** 2
+
+  /** Distance from point p to segment ab. */
+  const segmentDistance = (p: Pt, a: Pt, b: Pt) => {
+    const dx = b.x - a.x
+    const dy = b.y - a.y
+    const len2 = dx * dx + dy * dy || 1
+    const t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2))
+    return Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy))
+  }
+
+  /**
+   * Do two segments properly intersect? Standard orientation test. Touching at
+   * a shared endpoint does NOT count — two links may legitimately meet at the
+   * same cluster — and collinear overlap is treated as a crossing, because two
+   * lines lying on top of each other is exactly the clutter this rejects.
+   */
+  const segmentsCross = (a1: Pt, a2: Pt, b1: Pt, b2: Pt): boolean => {
+    const shared = (p: Pt, q: Pt) => Math.abs(p.x - q.x) < 1e-6 && Math.abs(p.y - q.y) < 1e-6
+    if (shared(a1, b1) || shared(a1, b2) || shared(a2, b1) || shared(a2, b2)) return false
+    const orient = (p: Pt, q: Pt, r: Pt) => {
+      const v = (q.y - p.y) * (r.x - q.x) - (q.x - p.x) * (r.y - q.y)
+      return v > 1e-9 ? 1 : v < -1e-9 ? -1 : 0
+    }
+    const o1 = orient(a1, a2, b1)
+    const o2 = orient(a1, a2, b2)
+    const o3 = orient(b1, b2, a1)
+    const o4 = orient(b1, b2, a2)
+    if (o1 !== o2 && o3 !== o4) return true
+    const onSeg = (p: Pt, q: Pt, r: Pt) =>
+      Math.min(p.x, r.x) - 1e-9 <= q.x && q.x <= Math.max(p.x, r.x) + 1e-9
+      && Math.min(p.y, r.y) - 1e-9 <= q.y && q.y <= Math.max(p.y, r.y) + 1e-9
+    return (o1 === 0 && onSeg(a1, b1, a2)) || (o2 === 0 && onSeg(a1, b2, a2))
+      || (o3 === 0 && onSeg(b1, a1, b2)) || (o4 === 0 && onSeg(b1, a2, b2))
+  }
+
+  /**
+   * Each group's OCCUPIED BUBBLE: hub centre, radius spanning its actual
+   * cluster orbit (the furthest cluster from the hub) plus a margin — the disc
+   * a foreign line must not enter.
+   */
+  const bubbles = hubs.map((h) => {
+    const own = clustersOf(h.id)
+    const orbit = own.length
+      ? Math.max(...own.map(c => Math.hypot((c.x ?? 0) - h.x, (c.y ?? 0) - h.y)))
+      : h.radius
+    return { id: h.id, x: h.x, y: h.y, r: orbit + GROUP_BUBBLE_MARGIN }
+  })
+
+  /**
+   * FACING clusters of a group: on the near side toward the partner hub (the
+   * cluster→hub offset projects positively on the hub→partner direction), so
+   * the link leaves the group at its outer edge instead of crossing it.
+   * Sorted nearest-to-partner. Falls back to nearest-3 for the rare group
+   * whose seed ring leaves nothing strictly facing.
+   */
+  const facing = (hub: { x: number, y: number }, ownClusters: NetworkNode[], toward: Pt) => {
+    const dirX = toward.x - hub.x
+    const dirY = toward.y - hub.y
+    const near = ownClusters.filter(c =>
+      ((c.x ?? 0) - hub.x) * dirX + ((c.y ?? 0) - hub.y) * dirY >= 0)
+    const pool = near.length ? near : ownClusters
+    return [...pool].sort((m, n) =>
+      dist2({ x: m.x ?? 0, y: m.y ?? 0 }, toward) - dist2({ x: n.x ?? 0, y: n.y ?? 0 }, toward))
+  }
+
+  interface Candidate { s: string, t: string, bubbleHits: number, blocked: number, crossings: number, len: number, a: Pt, b: Pt }
+
+  /** Accepted segments so far — every candidate is crossing-tested against these. */
+  const accepted: Array<{ a: Pt, b: Pt }> = []
+
+  /** The best candidate pair for a hub pair, under the full rule set. */
+  const bestPairFor = (hubA: typeof hubs[number], hubB: typeof hubs[number]): Candidate | null => {
+    // A design-reviewed pin narrows the pool to exactly that cluster pair —
+    // the metrics below still run on it, so a pin is validated, not blind.
+    const pin = CROSS_LINK_PINS[[hubA.id, hubB.id].sort().join('~')]
+    const pick = (own: NetworkNode[]) => (pin
+      ? own.filter(c => pin.includes(c.id))
+      : own)
+    const candidatesA = pick(facing(hubA, clustersOf(hubA.id), hubB))
+    const candidatesB = pick(facing(hubB, clustersOf(hubB.id), hubA))
+    let best: Candidate | null = null
+    for (const ca of candidatesA) {
+      for (const cb of candidatesB) {
+        const a = { x: ca.x ?? 0, y: ca.y ?? 0 }
+        const b = { x: cb.x ?? 0, y: cb.y ?? 0 }
+        // Bubbles of every group the link does not terminate in.
+        const bubbleHits = bubbles.reduce((count, bub) => (
+          bub.id === hubA.id || bub.id === hubB.id ? count
+            : count + (segmentDistance(bub, a, b) < bub.r ? 1 : 0)
+        ), 0)
+        const blocked = obstacles.reduce((count, o) => (
+          o.id === ca.id || o.id === cb.id ? count
+            : count + (segmentDistance(o, a, b) < CROSS_LINK_CLEARANCE ? 1 : 0)
+        ), 0)
+        const crossings = accepted.reduce((count, seg) => (
+          count + (segmentsCross(a, b, seg.a, seg.b) ? 1 : 0)
+        ), 0)
+        const len = dist2(a, b)
+        const cand: Candidate = { s: ca.id, t: cb.id, bubbleHits, blocked, crossings, len, a, b }
+        // Strict priority: bubbles pierced, then node obstructions, then
+        // crossings with accepted segments, then length, then id order.
+        const rank = (c: Candidate) => [c.bubbleHits, c.blocked, c.crossings, c.len]
+        const better = !best || (() => {
+          const kc = rank(cand)
+          const kb = rank(best)
+          for (let i = 0; i < kc.length; i++) {
+            if (kc[i] !== kb[i]) return kc[i] < kb[i]
+          }
+          return `${cand.s}~${cand.t}` < `${best.s}~${best.t}`
+        })()
+        if (better) best = cand
+      }
+    }
+    return best
+  }
+
+  // ── Kruskal with validation: nearest hub pairs first, skip blocked ones ──
+  const parent = new Map<string, string>(hubs.map(h => [h.id, h.id]))
+  const find = (id: string): string => {
+    const p = parent.get(id)!
+    if (p === id) return id
+    const root = find(p)
+    parent.set(id, root)
+    return root
+  }
+  const pairs: Array<{ a: typeof hubs[number], b: typeof hubs[number], d: number }> = []
+  for (let i = 0; i < hubs.length; i++) {
+    for (let j = i + 1; j < hubs.length; j++) {
+      pairs.push({ a: hubs[i], b: hubs[j], d: dist2(hubs[i], hubs[j]) })
+    }
+  }
+  pairs.sort((m, n) => m.d - n.d || (`${m.a.id}~${m.b.id}` < `${n.a.id}~${n.b.id}` ? -1 : 1))
+
+  const links: NetworkLink[] = []
+  const used = new Set<string>()
+  const take = (cand: Candidate) => {
+    const key = [cand.s, cand.t].sort().join('~')
+    if (used.has(key)) return
+    used.add(key)
+    accepted.push({ a: cand.a, b: cand.b })
+    links.push({ source: cand.s, target: cand.t })
+  }
+
+  // Strict pass: only clean links (no bubbles pierced, nothing blocked or crossed).
+  for (const pair of pairs) {
+    if (find(pair.a.id) === find(pair.b.id)) continue
+    const cand = bestPairFor(pair.a, pair.b)
+    if (!cand || cand.bubbleHits > 0 || cand.blocked > 0 || cand.crossings > 0) continue
+    parent.set(find(pair.a.id), find(pair.b.id))
+    take(cand)
+  }
+  // Relaxed pass, only for components the strict pass could not join: the
+  // least-imperfect line still beats an island.
+  for (const pair of pairs) {
+    if (find(pair.a.id) === find(pair.b.id)) continue
+    const cand = bestPairFor(pair.a, pair.b)
+    if (!cand) continue
+    parent.set(find(pair.a.id), find(pair.b.id))
+    take(cand)
+  }
+  return links
+})()
+
+/** Every rendered node, in one place: the dataset's own list and the kind
+ *  index the link rules resolve against. */
+const ALL_NODES: NetworkNode[] = [
+  ...RELEVANT_SOURCES.map(h => ({ id: h.id, label: h.id, kind: 'source' as const, x: h.x, y: h.y, size: 10, sourceIcon: SOURCE_ICONS[h.id] })),
+  ...DOCUMENTS,
+  ...INSIGHTS,
+  ...rings.flatMap(r => r.nodes),
+]
+const NODE_KIND_BY_ID = new Map(ALL_NODES.map(n => [n.id, n.kind]))
 
 export const graphWorkspace: GraphWorkspaceData = {
   user: { name: 'Grace Ruiz', initials: 'GR', unread: 3, email: 'grace.ruiz@example.com', tokens: 32 },
@@ -843,14 +1186,14 @@ export const graphWorkspace: GraphWorkspaceData = {
   // canvas stays populated.
   defaultPeriod: { start: 3, end: 8 },
 
-  nodes: [
-    ...RELEVANT_SOURCES.map(h => ({ id: h.id, label: h.id, kind: 'source' as const, x: h.x, y: h.y, size: 10, sourceIcon: SOURCE_ICONS[h.id] })),
-    ...DOCUMENTS,
-    ...INSIGHTS,
-    ...rings.flatMap(r => r.nodes),
-  ],
+  nodes: ALL_NODES,
 
-  links: [...NAMED_LINKS, ...rings.flatMap(r => r.links)],
+  // Assembled once, then swept: no path into this array may introduce an
+  // Insight ↔ Insight relationship (graphLinkRules.ts).
+  links: withoutDisallowedLinks(
+    [...NAMED_LINKS, ...rings.flatMap(r => r.links), ...CROSS_GROUP_CLUSTER_LINKS],
+    id => NODE_KIND_BY_ID.get(id),
+  ),
 
   legend: [
     { id: 'insight', label: 'Insight', shape: 'dot', ink: 'insight' },
@@ -972,15 +1315,40 @@ export const graphWorkspace: GraphWorkspaceData = {
 
   railSummary: {
     title: 'Graph summary',
-    // 2–4 scannable lines that read like a digest of THIS demo graph — the
-    // Legalfab / Northwind storyline the insights and evidence blocks tell —
-    // not generic product copy. Synthetic, like everything in this dataset.
-    body: 'Activity centres on the Legalfab agreement and the Northwind MSA, '
-      + 'with contract entities clustering around Gmail and Drive threads. '
-      + 'Two insights stand out: deal momentum building on Legalfab, and a '
-      + 'renewal risk forming on Northwind.',
+    // A digest of THIS demo graph — the Legalfab / Northwind storyline the
+    // insights and evidence blocks tell — not generic product copy. Synthetic,
+    // like everything in this dataset. The block grows with its content: the
+    // rail's summary section has no fixed height.
+    // Every marked name resolves to a REAL node id in this dataset —
+    // 'doc-legalfab' / 'doc-northwind' are the document hubs, 'Gmail' /
+    // 'Google Drive' the sources. Plain words stay plain strings: only actual
+    // graph items become references.
+    body: [
+      'The current graph shows two dominant areas of activity: ',
+      { text: 'Legalfab', refId: 'doc-legalfab' },
+      ' and ',
+      { text: 'Northwind', refId: 'doc-northwind' },
+      '. ',
+      { text: 'Legalfab', refId: 'doc-legalfab' },
+      ' has the highest concentration of connected agreement entities, with '
+      + 'supporting evidence distributed across ',
+      { text: 'Gmail', refId: 'Gmail' },
+      ', ',
+      { text: 'Drive', refId: 'Google Drive' },
+      ', and related workflow activity. These connections point to growing '
+      + 'deal momentum and a clearer path toward the next decision stage. ',
+      { text: 'Northwind', refId: 'doc-northwind' },
+      ' is more dispersed, with renewal signals appearing across several '
+      + 'sources and a weaker concentration of supporting evidence. The '
+      + 'broader network remains active, but these two clusters account for '
+      + 'the most meaningful recent movement, with ',
+      { text: 'Legalfab', refId: 'doc-legalfab' },
+      ' trending positively and ',
+      { text: 'Northwind', refId: 'doc-northwind' },
+      ' presenting the strongest emerging risk.',
+    ],
     kpis: [
-      { id: 'entities', label: 'Entities', icon: 'network4' },
+      { id: 'entities', label: 'Entities', icon: 'scisControlTower' },
       { id: 'insights', label: 'Insights', icon: 'cicsExplorer' },
       { id: 'sources', label: 'Sources', icon: 'fileSystem' },
     ],
@@ -993,66 +1361,63 @@ export const graphWorkspace: GraphWorkspaceData = {
     // answer agree about where the material came from.
     reasoning: [
       { id: 'rs-processing', title: 'Processing question' },
+      // A PLAIN step label: no items, so AssistantAccordion renders it as a
+      // status line — no chevron, not clickable. The three sub-questions
+      // follow it as their own accordions, which is the whole hierarchy:
+      // thought toggle → question accordion → plain text + chips.
+      { id: 'rs-decompose', title: 'Decomposed into 3 sub-questions:' },
       {
-        id: 'rs-decompose',
-        title: 'Decomposed into 3 sub-questions:',
-        // The PARENT: opening it reveals only this list — each sub-question
-        // is its own nested accordion, collapsed until opened individually.
-        children: [
+        id: 'rs-signals',
+        title: 'What verified signals demonstrate Legalfab\'s actual progress?',
+        items: [
           {
-            id: 'rs-signals',
-            title: 'What verified signals demonstrate Legalfab\'s actual progress?',
-            items: [
-              {
-                text: 'Found 6 triples and 18 chunks',
-                // Three chips: two singles and one folded multi (7 DISTINCT
-                // sources → +4). The first three carry mapped logos; the
-                // folded tail includes connected tools without graph-node
-                // icons — SourceChip only renders logos for the visible
-                // three, so the overflow entries need names, not assets.
-                chips: [
-                  ['Google Drive'],
-                  ['Gmail'],
-                  ['Spotify', 'Slack', 'LinkedIn', 'WhatsApp', 'Dropbox', 'Zoom', 'Udemy'],
-                ],
-              },
-              {
-                text: 'Checking if retrieved info is sufficient for sub-question',
-                document: { name: 'Project_Atlas_Status', ext: 'pptx' },
-              },
-              { text: 'Existing information is sufficient, proceeding to the next question' },
+            text: 'Found 6 triples and 18 chunks',
+            // Three chips: two singles and one folded multi (7 DISTINCT
+            // sources → +4). The first three carry mapped logos; the
+            // folded tail includes connected tools without graph-node
+            // icons — SourceChip only renders logos for the visible
+            // three, so the overflow entries need names, not assets.
+            chips: [
+              ['Google Drive'],
+              ['Gmail'],
+              ['Spotify', 'Slack', 'LinkedIn', 'WhatsApp', 'Dropbox', 'Zoom', 'Udemy'],
             ],
           },
           {
-            id: 'rs-valuation',
-            title: 'Which insight most strongly supports valuation justification in an investor context?',
-            items: [
-              {
-                text: 'Found 2 triples and 8 chunks',
-                chips: [['LinkedIn'], ['Slack']],
-              },
-              {
-                text: 'Checking if retrieved info is sufficient for sub-question',
-                document: { name: 'Project_Atlas_Status', ext: 'pptx' },
-              },
-              { text: 'Existing information is sufficient, proceeding to the next question' },
-            ],
+            text: 'Checking if retrieved info is sufficient for sub-question',
+            document: { name: 'Project_Atlas_Status', ext: 'pptx' },
+          },
+          { text: 'Existing information is sufficient, proceeding to the next question' },
+        ],
+      },
+      {
+        id: 'rs-valuation',
+        title: 'Which insight most strongly supports valuation justification in an investor context?',
+        items: [
+          {
+            text: 'Found 2 triples and 8 chunks',
+            chips: [['LinkedIn'], ['Slack']],
           },
           {
-            id: 'rs-momentum',
-            title: 'What evidence best demonstrates execution momentum and market validation?',
-            items: [
-              {
-                text: 'Found 4 triples and 11 chunks',
-                chips: [['Gmail'], ['WhatsApp']],
-              },
-              {
-                text: 'Checking if retrieved info is sufficient for sub-question',
-                document: { name: 'Legalfab_SHA_v4', ext: 'pdf' },
-              },
-              { text: 'Existing information is sufficient, all sub-questions answered' },
-            ],
+            text: 'Checking if retrieved info is sufficient for sub-question',
+            document: { name: 'Project_Atlas_Status', ext: 'pptx' },
           },
+          { text: 'Existing information is sufficient, proceeding to the next question' },
+        ],
+      },
+      {
+        id: 'rs-momentum',
+        title: 'What evidence best demonstrates execution momentum and market validation?',
+        items: [
+          {
+            text: 'Found 4 triples and 11 chunks',
+            chips: [['Gmail'], ['WhatsApp']],
+          },
+          {
+            text: 'Checking if retrieved info is sufficient for sub-question',
+            document: { name: 'Legalfab_SHA_v4', ext: 'pdf' },
+          },
+          { text: 'Existing information is sufficient, all sub-questions answered' },
         ],
       },
       { id: 'rs-retrieval', title: 'Initial retrieval' },

@@ -24,12 +24,22 @@
  */
 
 import type { RadialConnection } from './useStructuredGeometry'
+import { isInsightToInsight } from '@/data/graphLinkRules'
 
 let resolved: RadialConnection[] = []
 
 /** Called by the renderer with every resolved connection, drawn or not. */
 export function setResolvedConnections(connections: RadialConnection[]): void {
-  resolved = connections
+  /*
+   * The Structured render-time safeguard for the Insight ↔ Insight rule: this
+   * is the ONE seam every structured feature reads its relationships from
+   * (mesh, hover neighbourhoods, the focus detail, the badge counts), so
+   * dropping the pair here removes it from the lines AND from everything
+   * derived from them. See src/data/graphLinkRules.ts.
+   */
+  resolved = connections.filter(
+    conn => !isInsightToInsight(conn.sourceNode?.kind, conn.targetNode?.kind),
+  )
 }
 
 /**

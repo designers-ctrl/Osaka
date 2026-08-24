@@ -29,6 +29,7 @@ import {
   STRUCTURED_RINGS,
   STRUCTURED_NODE_SIZES,
   getStructuredClusterLabelFontSize,
+  getStructuredClusterLabelRadius,
 } from '../structuredTokens'
 import { GRAPH_DOCUMENT_HUBS } from '@/data/graph-config'
 import { documentNodeIconFor, getSourceNodeIcon } from '@/data/sourceNodeIcons'
@@ -190,7 +191,10 @@ export function renderClusterRing(
   // (already matches SVG's default, so NO -90° offset correction needed)
 
   // Labels track the ring radius token — never a separate hardcoded radius
-  const labelRadius = STRUCTURED_RINGS.cluster + CLUSTER_RING.label.arcDistance
+  // Zoom-aware radial placement through the SHARED rule (the zoom branch in
+  // NetworkGraphD3 re-applies the same function), so the on-screen gap between
+  // a node and its label stays constant instead of scaling with the camera.
+  const labelRadius = getStructuredClusterLabelRadius(_config.zoom || 1)
   // Constant-screen sizing from the FIRST paint, through the SAME helper the
   // NetworkGraphD3 structured zoom branch uses, so first render and zoom
   // updates cannot diverge. The first paint shows the fit-to-view camera,

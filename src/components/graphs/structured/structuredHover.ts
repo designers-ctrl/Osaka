@@ -28,6 +28,7 @@
  */
 
 import * as d3 from 'd3'
+import { isInsightToInsight } from '@/data/graphLinkRules'
 import { setBridgeBadgeLabelVisible } from './components/renderClusterEntityBridge'
 import type { RadialConnection } from './useStructuredGeometry'
 import { STRUCTURED_HOVER } from './structuredTokens'
@@ -98,6 +99,13 @@ export function isMeaningfulConnection(
   conn: { sourceNode: { id: string, kind: string }, targetNode: { id: string, kind: string } },
 ): boolean {
   if (!hasVisibleEndpoints(conn)) return false
+  /*
+   * ⛔ Insight ↔ Insight is never a relationship this graph draws — rejected
+   * at CREATION, so no element exists for hover, highlight or any future
+   * emphasis mode to reveal (src/data/graphLinkRules.ts). Filtering only where
+   * the connections are published left the mesh drawing them.
+   */
+  if (isInsightToInsight(conn.sourceNode.kind, conn.targetNode.kind)) return false
   return representativeId(conn.sourceNode) !== representativeId(conn.targetNode)
 }
 
@@ -183,7 +191,7 @@ export function applyStructuredHoverIsolation(
     fade(viewportGroup.selectAll('.link-background')).style('opacity', connection.bgBase)
     fade(viewportGroup.selectAll(
       'g.cluster-node-group, g.cluster-label-group, '
-      + '.entity-node, .entity-node-base, .entity-node-highlight, .entity-count, '
+      + 'g.entity-summary-group, '
       + '.insight-node, .cluster-entity-bridge, g.cluster-entity-badge',
     )).style('opacity', relatedOpacity)
     return
@@ -240,7 +248,9 @@ export function applyStructuredHoverIsolation(
   fade(viewportGroup.selectAll('g.cluster-label-group')).style('opacity', nodeOpacity)
 
   // Entity summaries (same id space as clusters) + their base/count/highlight
-  fade(viewportGroup.selectAll('.entity-node, .entity-node-base, .entity-node-highlight, .entity-count'))
+  // ONE selector: the summary group carries base + glass + highlight + count,
+  // so all four dim together and none can be missed.
+  fade(viewportGroup.selectAll('g.entity-summary-group'))
     .style('opacity', nodeOpacity)
 
   // Cluster → Entity bridges and confidence badges follow their cluster

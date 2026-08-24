@@ -33,11 +33,12 @@
 -->
 
 <script setup lang="ts">
+  import AnswerProse from '@/components/AnswerProse.vue'
   import AppButton from '@/components/AppButton.vue'
   import DataVizCard from '@/components/DataVizCard.vue'
   import InsightCard from '@/components/InsightCard.vue'
   import { BarChart, LineChart } from '@/components/charts'
-  import type { AnswerRichText, DemoAnswer } from '@/data/graphWorkspace'
+  import type { DemoAnswer } from '@/data/graphWorkspace'
 
   defineProps<{
     answer: DemoAnswer
@@ -69,13 +70,9 @@
     { id: 'update', icon: 'refresh', label: 'Update response' },
   ] as const
 
-  function onRef(segment: Exclude<AnswerRichText[number], string>) {
-    emit('ref-click', segment.refId ?? segment.text)
-  }
-
-  function onRefHover(segment: Exclude<AnswerRichText[number], string> | null) {
-    emit('ref-hover', segment ? (segment.refId ?? segment.text) : null)
-  }
+  /** Forwarded from AnswerProse — the runs renderer owns the ref markup. */
+  const onRef = (refId: string) => emit('ref-click', refId)
+  const onRefHover = (refId: string | null) => emit('ref-hover', refId)
 </script>
 
 <template>
@@ -87,19 +84,7 @@
         :key="index"
         class="assistant-answer__body text-body-large"
       >
-        <template v-for="(seg, segIndex) in paragraph" :key="segIndex">
-          <template v-if="typeof seg === 'string'">{{ seg }}</template>
-          <button
-            v-else
-            type="button"
-            class="assistant-answer__ref"
-            @click="onRef(seg)"
-            @mouseenter="onRefHover(seg)"
-            @mouseleave="onRefHover(null)"
-            @focus="onRefHover(seg)"
-            @blur="onRefHover(null)"
-          >{{ seg.text }}</button>
-        </template>
+        <AnswerProse :runs="paragraph" @ref-click="onRef" @ref-hover="onRefHover" />
       </p>
     </section>
 
@@ -115,19 +100,7 @@
           {{ section.heading }}
         </h3>
         <p class="assistant-answer__body text-body-large">
-          <template v-for="(seg, segIndex) in section.body" :key="segIndex">
-            <template v-if="typeof seg === 'string'">{{ seg }}</template>
-            <button
-              v-else
-              type="button"
-              class="assistant-answer__ref"
-              @click="onRef(seg)"
-              @mouseenter="onRefHover(seg)"
-              @mouseleave="onRefHover(null)"
-              @focus="onRefHover(seg)"
-              @blur="onRefHover(null)"
-            >{{ seg.text }}</button>
-          </template>
+          <AnswerProse :runs="section.body" @ref-click="onRef" @ref-hover="onRefHover" />
         </p>
 
         <!-- The figure closes the Evidence run — the analysis sections below
@@ -165,19 +138,7 @@
           {{ section.heading }}
         </h3>
         <p class="assistant-answer__body text-body-large">
-          <template v-for="(seg, segIndex) in section.body" :key="segIndex">
-            <template v-if="typeof seg === 'string'">{{ seg }}</template>
-            <button
-              v-else
-              type="button"
-              class="assistant-answer__ref"
-              @click="onRef(seg)"
-              @mouseenter="onRefHover(seg)"
-              @mouseleave="onRefHover(null)"
-              @focus="onRefHover(seg)"
-              @blur="onRefHover(null)"
-            >{{ seg.text }}</button>
-          </template>
+          <AnswerProse :runs="section.body" @ref-click="onRef" @ref-hover="onRefHover" />
         </p>
       </div>
     </section>
@@ -186,34 +147,10 @@
     <section class="d-flex flex-column ga-4">
       <h2 class="assistant-answer__heading text-headline-small">Insights</h2>
       <InsightCard>
-        <template v-for="(seg, segIndex) in answer.insight.card" :key="segIndex">
-          <template v-if="typeof seg === 'string'">{{ seg }}</template>
-          <button
-            v-else
-            type="button"
-            class="assistant-answer__ref"
-            @click="onRef(seg)"
-            @mouseenter="onRefHover(seg)"
-            @mouseleave="onRefHover(null)"
-            @focus="onRefHover(seg)"
-            @blur="onRefHover(null)"
-          >{{ seg.text }}</button>
-        </template>
+        <AnswerProse :runs="answer.insight.card" @ref-click="onRef" @ref-hover="onRefHover" />
       </InsightCard>
       <p class="assistant-answer__body text-body-large">
-        <template v-for="(seg, segIndex) in answer.insight.conclusion" :key="segIndex">
-          <template v-if="typeof seg === 'string'">{{ seg }}</template>
-          <button
-            v-else
-            type="button"
-            class="assistant-answer__ref"
-            @click="onRef(seg)"
-            @mouseenter="onRefHover(seg)"
-            @mouseleave="onRefHover(null)"
-            @focus="onRefHover(seg)"
-            @blur="onRefHover(null)"
-          >{{ seg.text }}</button>
-        </template>
+        <AnswerProse :runs="answer.insight.conclusion" @ref-click="onRef" @ref-hover="onRefHover" />
       </p>
     </section>
 
@@ -224,18 +161,23 @@
         x="label"
         y="value"
         :title="answer.barChart.ariaTitle"
-        :height="260"
+        :height="320"
         :y-ticks="5"
         :series-color-index="1"
+        :bar-width="14"
         value-suffix="%"
+        :x-label-max-width="70"
+        :grid-bottom-extra="24"
         show-values
+        value-badge
+        gradient-bars
         dotted-grid
         vertical-grid
       />
     </DataVizCard>
 
     <!-- ── Response actions: subtle at rest, brighter on hover ──────────── -->
-    <div class="assistant-answer__actions d-flex ga-1">
+    <div class="assistant-answer__actions d-flex">
       <AppButton
         v-for="action in ACTIONS"
         :key="action.id"
@@ -293,42 +235,14 @@
   }
 
   /*
-   * ── INLINE REFERENCES ────────────────────────────────────────────────────
-   * Source/document/entity names inside the prose, rendered as subtle links:
-   * the dotted underline from the reference, on the body's own ink so they
-   * read as part of the sentence — lifting to full ink on hover/focus. A real
-   * <button> (inline, chrome stripped) so keyboard and AT get them for free.
+   * The action row sits one step back until pointed at, and always closes the
+   * answer with 24px beneath it — owned here rather than by the chat stack, so
+   * every answer ends with the same gap wherever it is rendered.
    */
-  .assistant-answer__ref {
-    display: inline;
-    padding: 0;
-    border: none;
-    background: transparent;
-    font: inherit;
-    color: inherit;
-    text-decoration-line: underline;
-    text-decoration-style: dotted;
-    text-decoration-color: rgba(var(--v-theme-button-white-60));
-    text-underline-offset: 3px;
-    cursor: pointer;
-  }
-
-  .assistant-answer__ref:hover,
-  .assistant-answer__ref:focus-visible {
-    color: rgba(var(--v-theme-button-white-100));
-    text-decoration-color: rgba(var(--v-theme-button-white-100));
-  }
-
-  .assistant-answer__ref:focus-visible {
-    outline: 2px solid rgba(var(--v-theme-button-white-100), 0.3);
-    outline-offset: 2px;
-    border-radius: 2px;
-  }
-
-  /* The action row sits one step back until pointed at. */
   .assistant-answer__actions {
     opacity: 0.6;
     transition: opacity 0.18s ease;
+    margin-bottom: 24px;
   }
 
   .assistant-answer__actions:hover,

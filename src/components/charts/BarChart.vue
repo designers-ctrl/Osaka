@@ -74,6 +74,21 @@ const props = withDefaults(defineProps<{
   /** Value labels above each bar (single-series only), like LineChart's. */
   showValues?: boolean
   /**
+   * Max width (px) for ONE line of a category-axis label. Set it and long
+   * names wrap onto a second line at word boundaries instead of being thinned
+   * out or overlapping their neighbours; leave it unset and the axis behaves
+   * exactly as before. Opt-in per chart — never a kit-wide default.
+   */
+  xLabelMaxWidth?: number
+  /**
+   * Extra grid room BELOW the category labels, in px — breathing space between
+   * the axis band and the card edge. Additive over the derived wrap-aware
+   * floor, so wrapped labels stay fully visible and the extra reads as air.
+   */
+  gridBottomExtra?: number
+  /** Lines a wrapped category label may use before the rest is folded in. */
+  xLabelMaxLines?: number
+  /**
    * Suffix appended to axis tick labels AND bar value labels — '%' turns a
    * 0–40 scale into a percentage reading without changing the data.
    */
@@ -88,12 +103,34 @@ const props = withDefaults(defineProps<{
    * entity purple). Default keeps ECharts' own first-color assignment.
    */
   seriesColorIndex?: number
+  /**
+   * Fixed bar thickness in px. Narrow bars read as marks on a field rather
+   * than as a block chart; left unset the bars fill their band up to the
+   * 36px cap.
+   */
+  barWidth?: number
+  /**
+   * Fill each bar with a VERTICAL gradient of its own series colour — full
+   * strength at the top, fading toward transparent at the baseline. The hue
+   * still comes from the theme palette; only its alpha ramps, so the bar reads
+   * as light coming off the top of the mark.
+   */
+  gradientBars?: boolean
+  /**
+   * Draw each value label on a small dark rounded badge instead of as bare
+   * text. Keeps the figure's one emphatic element legible over the bars and
+   * the grid, with everything else recessive.
+   */
+  valueBadge?: boolean
 }>(), {
   glass: false,
   height: 260,
   showValues: false,
   dottedGrid: false,
   verticalGrid: false,
+  gradientBars: false,
+  valueBadge: false,
+  xLabelMaxLines: 2,
 })
 
 const th = useChartTheme()
@@ -115,11 +152,60 @@ function niceScale(dataMax: number, ticks: number): { interval: number, max: num
   return { interval, max: interval * steps }
 }
 
+/**
+ * ── CATEGORY-LABEL WRAPPING ────────────────────────────────────────────────
+ * SVG <text> ignores CSS width, and ECharts' own `width` + `overflow: 'break'`
+ * splits mid-WORD ("WhatsApp Dema|nd"). So the wrap is done in the formatter,
+ * at word boundaries, against a REAL measurement of the rendered font rather
+ * than a character-count guess — one offscreen canvas, reused for every label.
+ */
+let measureCtx: CanvasRenderingContext2D | null = null
+function textWidth(text: string, font: string): number {
+  if (typeof document === 'undefined') return text.length * 6
+  measureCtx ??= document.createElement('canvas').getContext('2d')
+  if (!measureCtx) return text.length * 6
+  measureCtx.font = font
+  return measureCtx.measureText(text).width
+}
+
+/**
+ * Greedy word wrap to `maxWidth`, capped at `maxLines`: anything past the cap
+ * is folded back onto the last line rather than dropped, so a label is never
+ * silently truncated. A single unbreakable word is returned as-is — better one
+ * over-wide label than a mid-word break.
+ */
+function wrapLabel(text: string, maxWidth: number, font: string, maxLines: number): string {
+  const words = String(text).split(/\s+/).filter(Boolean)
+  if (words.length <= 1) return String(text)
+  const lines: string[] = []
+  let line = ''
+  for (const word of words) {
+    const candidate = line ? `${line} ${word}` : word
+    if (line && textWidth(candidate, font) > maxWidth) {
+      lines.push(line)
+      line = word
+    } else {
+      line = candidate
+    }
+  }
+  if (line) lines.push(line)
+  if (lines.length > maxLines) {
+    const kept = lines.slice(0, maxLines - 1)
+    kept.push(lines.slice(maxLines - 1).join(' '))
+    return kept.join('\n')
+  }
+  return lines.join('\n')
+}
+
 const option = computed<EChartsOption>(() => {
   const t = th.value
   const single = !props.series
   const pv = pivot(props.data, props.x, props.y, props.series)
   const r = t.marks.barCornerRadius
+  /* The resolved single-series colour — the gradient ramps this same step. */
+  const barColor = props.seriesColorIndex != null
+    ? (t.categorical[props.seriesColorIndex] ?? t.categorical[0])
+    : t.categorical[0]
   const rows = props.data as readonly Record<string, unknown>[]
 
   /* The trend overlay: one value per category, stepped over the bar tops. */
@@ -314,7 +400,17 @@ const option = computed<EChartsOption>(() => {
     // above the highest y label — drop it to 8px, the minimum that keeps the
     // topmost label (centered on the max gridline) from clipping. With value
     // labels ON, the tallest bar's label needs that headroom back.
-    grid: { ...(baseChartOption(t).grid as object), top: single && !props.showValues ? 8 : 24 },
+    grid: {
+      ...(baseChartOption(t).grid as object),
+      top: single && !props.showValues ? 8 : 24,
+      // `containLabel` already reserves the label band, but a wrapped label is
+      // twice as tall — add a line's worth of floor so the second line can
+      // never sit against the card's edge.
+      bottom: (props.xLabelMaxWidth
+        ? 8 + Math.round(t.type.tickLabel * 1.3) * (props.xLabelMaxLines - 1)
+        : (baseChartOption(t).grid as any).bottom as number)
+        + (props.gridBottomExtra ?? 0),
+    },
     xAxis: {
       ...categoryAxis(t, props.xLabel, true),
       data: pv.categories,
@@ -329,8 +425,35 @@ const option = computed<EChartsOption>(() => {
               fontSize: t.type.tickLabel,
               fontFamily: t.fontFamily,
               interval: 0,
-              width: 84,
-              overflow: 'break' as const,
+              // Two lines of breathing room under the bars, so a wrapped
+              // category reads as one label rather than two rows.
+              lineHeight: 14,
+              margin: 10,
+            },
+          }
+        : {}),
+      /*
+       * WORD-WRAPPED category labels (opt-in via `xLabelMaxWidth`). The
+       * formatter measures against the axis' OWN font, so the wrap follows the
+       * theme's type scale rather than a hardcoded character count. Lines are
+       * centred under their tick, which is where a category axis anchors them.
+       */
+      ...(props.xLabelMaxWidth
+        ? {
+            axisLabel: {
+              color: t.axis,
+              fontSize: t.type.tickLabel,
+              fontFamily: t.fontFamily,
+              interval: 0,
+              align: 'center' as const,
+              lineHeight: Math.round(t.type.tickLabel * 1.3),
+              margin: 10,
+              formatter: (value: string) => wrapLabel(
+                value,
+                props.xLabelMaxWidth as number,
+                `${t.type.tickLabel}px ${t.fontFamily}`,
+                props.xLabelMaxLines,
+              ),
             },
           }
         : {}),
@@ -376,7 +499,7 @@ const option = computed<EChartsOption>(() => {
             name: single ? (props.yName ?? s.name) : s.name,
             type: 'bar',
             data: s.values,
-            barMaxWidth: 36,
+            ...(props.barWidth ? { barWidth: props.barWidth } : { barMaxWidth: 36 }),
             ...(single ? {} : { stack: 'total' }),
             itemStyle: {
               ...(single
@@ -387,6 +510,23 @@ const option = computed<EChartsOption>(() => {
               // theme palette step override (single-series) — see the prop note
               ...(single && props.seriesColorIndex != null
                 ? { color: t.categorical[props.seriesColorIndex] ?? t.categorical[0] }
+                : {}),
+              /*
+               * Vertical wash over that same palette colour. Declared AFTER the
+               * flat colour so it wins, and built from the resolved step rather
+               * than a literal — retune the palette and the gradient follows.
+               */
+              ...(single && props.gradientBars
+                ? {
+                    color: {
+                      type: 'linear' as const,
+                      x: 0, y: 0, x2: 0, y2: 1,
+                      colorStops: [
+                        { offset: 0, color: withAlpha(barColor, 1) },
+                        { offset: 1, color: withAlpha(barColor, 0.12) },
+                      ],
+                    },
+                  }
                 : {}),
             },
             // value labels above the bars — LineChart's showValues, for bars
@@ -399,6 +539,16 @@ const option = computed<EChartsOption>(() => {
                     fontSize: t.type.tickLabel,
                     fontFamily: t.fontFamily,
                     formatter: `{c}${props.valueSuffix ?? ''}`,
+                    // The badge: the chart's own surface behind the number, so
+                    // it stays readable wherever the bar top lands.
+                    ...(props.valueBadge
+                      ? {
+                          backgroundColor: t.surface,
+                          borderRadius: t.marks.barCornerRadius,
+                          padding: [3, 6, 3, 6],
+                          distance: 6,
+                        }
+                      : {}),
                   },
                 }
               : {}),

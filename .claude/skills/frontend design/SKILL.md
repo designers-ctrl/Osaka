@@ -105,7 +105,15 @@ per screenshot. Implementation notes live in `docs/architecture/CLUSTER_DRILLDOW
 14. **Zoom-out is clamped near the fit-to-view scale** — Structured to the exact fit,
     Unstructured to `fit × minZoomOutFactor` — so the graph can never shrink into an unreadable
     speck; the initial fit and Reset framing are untouched (gesture-level clamp only).
-15. **Node size hierarchy: Source < Cluster < Insight, at every zoom level** — Sources are always
+15. **Entity display names must be semantic, never raw filenames or document
+    filenames** — an entity label names the concept ("Brand Assets", "Renewal
+    Terms", "Project Atlas"), never the artifact it arrived as
+    ("Logo_Pack.zip", "Onboarding_Guide.pdf"): no extensions, no
+    `Underscore_Case` document titles. Names come from the shared pools in
+    `src/data/entityFill.ts`, so Structured and Unstructured read one identical
+    set. Document hubs and provenance chips still carry real document names —
+    this governs ENTITY labels only.
+16. **Node size hierarchy: Source < Cluster < Insight, at every zoom level** — Sources are always
     the smallest node kind (12 base diameter), Clusters start just above them (14) and scale with
     weight/entity count (→ 60), Insights start clearly larger (24 → 50). Each kind's minimum
     ON-SCREEN diameter is ordered the same way (12 / 14 / 24, `getEffectiveNodeRadius`), so

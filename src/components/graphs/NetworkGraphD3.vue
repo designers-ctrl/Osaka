@@ -17,7 +17,7 @@ import { useD3Force } from './useD3Force'
 import { useD3Hierarchy } from './useD3Hierarchy'
 import { useD3Interaction } from './useD3Interaction'
 import { useD3Drag } from './useD3Drag'
-import { useStructuredRenderer, STRUCTURED_VIEWPORT, CLUSTER_RING, STRUCTURED_FOCUS, getStructuredClusterLabelFontSize } from './structured'
+import { useStructuredRenderer, STRUCTURED_VIEWPORT, CLUSTER_RING, STRUCTURED_FOCUS, getStructuredClusterLabelFontSize, getStructuredClusterLabelRadius } from './structured'
 import { applyStructuredHoverIsolation } from './structured/structuredHover'
 import { resolveClusterOwnerId } from './structured/components/renderClusterRing'
 import {
@@ -67,6 +67,7 @@ import {
   applyLinkForegroundStyle,
   applyLinkEndpointStyle,
 } from './linkRenderer'
+import { withProximityBridges } from './proximityBridges'
 
 interface Props {
   nodes: NetworkNode[]
@@ -103,6 +104,11 @@ interface Emits {
   // Fired on every camera change with whether the viewport currently matches
   // the initial fit-to-view framing (drives the Reset control's visibility)
   (e: 'viewport-change', atInitialView: boolean): void
+  // Structured cluster-detail opened (true) or closed (false). The detail view
+  // deliberately never moves the camera, so `viewport-change` alone would
+  // leave Reset hidden while a cluster is open — this is the second input to
+  // that control's visibility, not a second control.
+  (e: 'focus-change', active: boolean): void
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -421,8 +427,12 @@ function computeInitialTransform(): d3.ZoomTransform {
       maxY += pad
       const boundsWidth = maxX - minX
       const boundsHeight = maxY - minY
+      // Backed off the exact fit (initialScaleFactor < 1), so the default view
+      // opens with air around the graph; manual zoom/pan are untouched.
       const scale = Math.min(VIEWPORT.dataWidth / boundsWidth, VIEWPORT.dataHeight / boundsHeight)
-      // Center the padded bounds inside the viewBox
+        * VIEWPORT.initialZoom.initialScaleFactor
+      // Center the padded bounds inside the viewBox (same scale as above, so
+      // backing off cannot de-centre the view)
       const tx = (VIEWPORT.dataWidth - boundsWidth * scale) / 2 - minX * scale
       const ty = (VIEWPORT.dataHeight - boundsHeight * scale) / 2 - minY * scale
       return d3.zoomIdentity.translate(tx, ty).scale(scale)
@@ -979,7 +989,15 @@ function initializeVisualization(resetZoom = true) {
     })
     warmupSimulation(simulation)
   }
-  const linkData = props.links
+  /*
+   * The RENDERED link set: the dataset's own cross-group cluster bridges are
+   * dropped and re-derived here, from the positions the pre-solve just settled
+   * (seedInitialLayout + warmupSimulation above). Choosing them at this point
+   * is what makes "nearest group" mean nearest ON SCREEN — the authored
+   * coordinates the dataset can see are re-arranged by the orbit and
+   * hub-separation forces before anything is drawn.
+   */
+  const linkData = withProximityBridges(props.links, layoutNodes.value as any)
     .map(link => ({
       source: typeof link.source === 'string'
         ? layoutNodes.value.find(n => n.id === link.source)
@@ -1750,11 +1768,21 @@ function initializeVisualization(resetZoom = true) {
         // helper as the initial render, so the two can never diverge.
         svg.selectAll('text.cluster-label')
           .attr('font-size', getStructuredClusterLabelFontSize(currentZoomScale, scaleExtent[0]))
-        // Focus drill-down labels follow the same constant-screen convention
-        svg.selectAll('text.structured-focus-label')
-          .attr('font-size', STRUCTURED_FOCUS.label.fontSize / currentZoomScale)
-        svg.selectAll('text.structured-focus-root-label')
-          .attr('font-size', STRUCTURED_FOCUS.label.rootFontSize / currentZoomScale)
+        // Radial DISTANCE is zoom-aware too (same shared rule as the initial
+        // render): the label group slides in/out along its own spoke so the
+        // node→label gap stays ~8–12 screen px at every zoom. Only the radius
+        // changes — the spoke angle and the hemisphere flip are untouched, so
+        // the radial orientation reads exactly as before.
+        {
+          const labelRadius = getStructuredClusterLabelRadius(currentZoomScale)
+          svg.selectAll<SVGGElement, any>('g.cluster-label-group')
+            .attr('transform', (d: any) =>
+              `rotate(${((d?.angle || 0) * 180) / Math.PI}) translate(${labelRadius}, 0)`)
+        }
+        // The detail circle lives INSIDE the camera (it is anchored on the
+        // focused cluster's own ring position), so its type, mark radii and
+        // stroke widths are re-divided by the new scale to stay constant-screen.
+        structuredFocusHandle?.rescale(currentZoomScale)
       }
 
       // Apply zoom transform to viewport (both structured and unstructured)
@@ -2338,124 +2366,228 @@ function applyZoomScale(factor: number) {
   svg.call(zoomBehaviorInstance.scaleBy, factor)
 }
 
-// ── Structured Cluster FOCUS (drill-down) ────────────────────────────────────
-// Clicking a cluster in Structured mode expands `Cluster → Insights →
-// Entities` from it, over the dimmed radial overview — see structuredFocus.ts.
-// SEVERAL clusters can be open at once: clicking a new one adds it, clicking an
-// expanded one closes just that one, and Reset closes them all. State lives here
-// because the camera (zoom behavior) does.
+// ── Structured Cluster DRILL-DOWN (roulette ring + fixed detail zone) ────────
+// Clicking a cluster turns the ring like a wheel until that cluster reaches the
+// focus angle, and draws its `Insights + Entities` in ONE FIXED ZONE of the
+// canvas over the dimmed overview — see structuredFocus.ts. Clicking another
+// cluster turns the wheel again and REPLACES the zone's content; the zone never
+// moves.
+//
+// ⚠️ THE CAMERA IS NEVER TOUCHED ON THIS PATH. There is deliberately no
+// `zoomBehaviorInstance.transform` call in selection or close: the graph is
+// never panned, zoomed or re-framed toward the clicked cluster, which is what
+// keeps the circle in one place. The user's own wheel/drag zoom and pan, and
+// Reset, keep working exactly as before.
 let structuredFocusHandle: StructuredFocusHandle | null = null
 /**
- * Open cluster ids in CLICK ORDER — oldest first, newest last. The order is
- * load-bearing twice over: the LAST entry is the primary (the cluster the rotor
- * turns to the focus side), and the FIRST is the one evicted at
- * `STRUCTURED_FOCUS.maxOpen`.
+ * The selected clusters, in click order — the order their bands are stacked in.
+ * Multi-selection: clicking a new cluster PINS it alongside whatever is already
+ * pinned, clicking a pinned one releases just that one, and the oldest gives way
+ * at `STRUCTURED_FOCUS.detail.maxSelected` so a click always does something
+ * visible rather than being silently refused.
  */
-const structuredOpenIds: string[] = []
+const structuredSelectedIds: string[] = []
 /**
- * Reactive mirror of "a Structured focus is open" — drives the viewport-edge
- * fade mask class on the <svg> (see `--edge-fade` in the stylesheet). The
- * mask is SCREEN-anchored, which is exactly why it is CSS on the canvas
- * element rather than an SVG mask: everything drawable lives inside the
+ * Reactive mirror of "a Structured drill-down is open" — drives the
+ * viewport-edge fade mask class on the <svg> (see `--edge-fade` in the
+ * stylesheet). The mask is SCREEN-anchored, which is exactly why it is CSS on
+ * the canvas element rather than an SVG mask: the ring lives inside the
  * zoom-transformed viewport group, where a mask would travel with the camera.
  */
 const structuredFocusActive = ref(false)
+// One emitter for every transition of the flag above — set it anywhere, the
+// host hears about it exactly once.
+watch(structuredFocusActive, active => emit('focus-change', active))
 /** The fade band depth, from the focus tokens, for the CSS mask (v-bind). */
 const focusEdgeFade = `${STRUCTURED_FOCUS.edgeFadePx}px`
 
 /**
- * Click a cluster: expand it alongside whatever is already expanded, or collapse
- * it if it is one of them. Never collapses the others.
+ * Click a cluster: select it (turning the wheel and filling the detail zone),
+ * or clear the selection if it is already the selected one.
  */
 function toggleStructuredFocus(clusterId: string) {
-  if (!svgRef.value || !zoomBehaviorInstance || props.layoutMode !== 'structured') return
-  const at = structuredOpenIds.indexOf(clusterId)
+  if (!svgRef.value || props.layoutMode !== 'structured') return
+  const at = structuredSelectedIds.indexOf(clusterId)
   if (at >= 0) {
-    // Clicking an EXPANDED cluster closes only that one; the rest stay open.
-    structuredOpenIds.splice(at, 1)
+    // Releasing one pinned cluster leaves the others exactly as they were.
+    structuredSelectedIds.splice(at, 1)
   } else {
-    structuredOpenIds.push(clusterId)
-    // Past the cap the OLDEST gives way, so a click always does something
-    // visible instead of being silently refused.
-    while (structuredOpenIds.length > STRUCTURED_FOCUS.maxOpen) structuredOpenIds.shift()
+    structuredSelectedIds.push(clusterId)
+    while (structuredSelectedIds.length > STRUCTURED_FOCUS.detail.maxSelected) {
+      structuredSelectedIds.shift()
+    }
+  }
+  if (!structuredSelectedIds.length) {
+    closeStructuredFocus()
+    return
   }
   applyStructuredFocus()
 }
 
 /**
- * Render whatever the open set currently is. One path for one cluster and for
- * many — the focus controller diffs the set itself (keyed by cluster id), so an
- * already-open fan is left untouched while the new one animates in.
+ * Render the current selection. Switching clusters is a wheel turn plus a
+ * CONTENT swap inside a zone that is already positioned — hence no camera work
+ * and no per-selection geometry.
  */
 function applyStructuredFocus() {
-  if (!svgRef.value || !zoomBehaviorInstance) return
+  if (!svgRef.value || !structuredSelectedIds.length) return
   const svg = d3.select(svgRef.value)
   const viewportG = svg.select<SVGGElement>('g.viewport')
 
-  const models = structuredOpenIds
+  const models = structuredSelectedIds
     .map(id => deriveStructuredFocus(viewportG as any, id))
     .filter((m): m is StructuredFocusModel => !!m)
-  // Drop ids whose cluster is no longer rendered, so the list can never hold a
-  // stale entry that keeps the focus alive invisibly.
-  if (models.length !== structuredOpenIds.length) {
-    structuredOpenIds.length = 0
-    structuredOpenIds.push(...models.map(m => m.clusterId))
+  // A selection whose cluster is no longer rendered can never be shown — drop it
+  // rather than keeping the drill-down alive on a stale id.
+  if (models.length !== structuredSelectedIds.length) {
+    structuredSelectedIds.length = 0
+    structuredSelectedIds.push(...models.map(m => m.clusterId))
   }
   if (!models.length) {
     closeStructuredFocus()
     return
   }
 
-  const camera = computeFocusCamera(models)
+  /*
+   * ⚠️ CAPTURED BEFORE THE FLAG IS RAISED. "Was it closed?" has to be read here,
+   * at the top: it decides whether this is an OPENING (move the camera into the
+   * drill-down framing and hand the canvas to the wheel) or a SWITCH between
+   * clusters (camera already in place — touching it would be the jump this mode
+   * exists to avoid). Testing the handle instead does not work: the handle
+   * outlives a close, so every reopening after the first would skip both.
+   */
+  const wasClosed = !structuredFocusActive.value
+
   structuredFocusActive.value = true
-  // Suspend hover isolation: the focus owns every opacity now (its own dim
-  // transition also overwrites whatever a hover pass had applied).
+  // Suspend hover isolation: the drill-down owns the emphasis now.
   setStructuredHoverSuspended(true)
+  /*
+   * THE DRILL-DOWN CAMERA — placed ONCE, on opening, and then FROZEN.
+   * `computeFocusCamera()` takes no arguments: the framing is the same for every
+   * cluster (the wheel parked off the left edge, about half of it on screen; the
+   * detail area filling the space to its right), so switching clusters is a
+   * wheel turn and a content swap with the camera already where it belongs.
+   *
+   * Pan and zoom are then switched OFF for as long as the drill-down is open —
+   * this mode is not a navigable canvas, it is a fixed screen with one control.
+   * Scroll and drag are re-bound to turning the wheel instead (below).
+   */
   structuredFocusHandle ??= createStructuredFocus(viewportG as any)
+  if (wasClosed && zoomBehaviorInstance) {
+    const camera = computeFocusCamera()
+    svg.transition().duration(STRUCTURED_FOCUS.rotationMs)
+      .call(zoomBehaviorInstance.transform as any, camera)
+      .on('end', () => bindRouletteControls(svg))
+  }
   structuredFocusHandle.update(models, {
-    cameraK: camera.k,
+    cameraK: computeFocusCamera().k,
     insightFill: chartTheme.value?.categorical?.[0] || '#F2C585',
     insightStroke: NODE_STYLING.insight.stroke,
     // The identical expression the drill-down passes as its `entityColor`, so a
-    // focus entity mark and an `expanded-entity` dot resolve to one colour.
+    // detail entity mark and an `expanded-entity` dot resolve to one colour.
     entityFill: nodeColor.value({ kind: 'entity' } as NetworkNode),
     // Same live token resolver the drill-down's chip uses — the isolated-entity
     // chip reads the expanded-region-chip tokens through it.
     themeColor,
+    // The selected cluster's highlight accent, from the live chart theme (its
+    // second categorical step is the #9D7EEA the design calls for).
+    selectionColor: chartTheme.value?.categorical?.[1],
+    // The region chip's × and the region circle both collapse THAT cluster —
+    // the same contract as the Unstructured drill-down's region/chip close.
+    onCollapse: id => toggleStructuredFocus(id),
   })
-  // Keep the min-zoom floor at whichever is lower, the focus camera or the
-  // initial fit, so the first wheel gesture never snaps.
-  zoomBehaviorInstance.scaleExtent([Math.min(camera.k, computeInitialTransform().k), VIEWPORT.zoomExtent[1]])
-  // ONE MOVE: the camera runs for the same duration as the rotor's rotation, so
-  // the graph turning into focus and the view framing it are a single motion
-  // rather than two staggered ones.
-  svg.transition().duration(STRUCTURED_FOCUS.rotationMs)
-    .call(zoomBehaviorInstance.transform as any, camera)
 }
 
-/** Close EVERY open cluster and restore the radial overview. */
-function closeStructuredFocus(animateCamera = true) {
-  if (!structuredOpenIds.length && !structuredFocusHandle) return
-  structuredOpenIds.length = 0
-  structuredFocusActive.value = false
-  structuredFocusHandle?.destroy(true)
-  structuredFocusHandle = null
-  setStructuredHoverSuspended(false)
+/**
+ * ── THE ROULETTE CONTROLS ────────────────────────────────────────────────────
+ *
+ * While the drill-down is open the canvas is NOT navigable: `zoom` is unbound
+ * from the <svg>, so nothing the user does can pan or zoom the view, and the
+ * detail area therefore cannot move. Scroll and drag are re-bound to turning the
+ * wheel — the one control this mode has.
+ *
+ * Bound in the `.zoom`-free namespaces below so releasing them cannot disturb
+ * anything else listening on the canvas.
+ */
+function bindRouletteControls(svg: d3.Selection<SVGSVGElement, unknown, any, unknown>) {
+  if (!zoomBehaviorInstance) return
+  // Off with the camera: no pan, no zoom, no double-click-to-zoom.
+  svg.on('.zoom', null)
+
+  svg.on('wheel.roulette', (event: WheelEvent) => {
+    event.preventDefault()
+    // Trackpads report small pixel deltas and mice large ones; the token is
+    // degrees per unit, so both feel like turning the same wheel.
+    structuredFocusHandle?.rotateBy(event.deltaY * STRUCTURED_FOCUS.detail.scrollDegPerUnit)
+  })
+
+  // Drag anywhere on the canvas spins the wheel about ITS centre — which sits
+  // off the right edge, so the gesture reads as pushing the rim round.
+  const wheelCentre = () => {
+    const camera = computeFocusCamera()
+    return { x: camera.x, y: camera.y }
+  }
+  let lastDeg = 0
+  svg.call(
+    d3.drag<SVGSVGElement, unknown>()
+      .container(function () { return this as any })
+      .on('start', (event: any) => {
+        const c = wheelCentre()
+        lastDeg = (Math.atan2(event.y - c.y, event.x - c.x) * 180) / Math.PI
+      })
+      .on('drag', (event: any) => {
+        const c = wheelCentre()
+        const now = (Math.atan2(event.y - c.y, event.x - c.x) * 180) / Math.PI
+        // Shortest signed step, so crossing ±180° is one small move, not a jump.
+        const step = ((now - lastDeg + 540) % 360) - 180
+        lastDeg = now
+        structuredFocusHandle?.rotateBy(step)
+      }) as any,
+  )
+}
+
+/** Hand the canvas back to the camera when the drill-down closes. */
+function releaseRouletteControls() {
   if (!svgRef.value || !zoomBehaviorInstance) return
-  const initial = computeInitialTransform()
-  zoomBehaviorInstance.scaleExtent([initial.k, VIEWPORT.zoomExtent[1]])
-  if (animateCamera) {
-    // Same single-motion pairing on the way out: the camera unwinds over the
-    // rotation's duration, alongside the rotor returning to 0.
+  const svg = d3.select(svgRef.value)
+  svg.on('wheel.roulette', null)
+  svg.on('.drag', null)
+  svg.call(zoomBehaviorInstance)
+}
+
+/**
+ * Clear the selection: the zone empties and the wheel unwinds to its resting
+ * orientation. The camera is left exactly where the user had it.
+ */
+function closeStructuredFocus() {
+  if (!structuredSelectedIds.length && !structuredFocusHandle) return
+  structuredSelectedIds.length = 0
+  structuredFocusActive.value = false
+  structuredFocusHandle?.update([], {
+    cameraK: currentZoomScale,
+    insightFill: chartTheme.value?.categorical?.[0] || '#F2C585',
+    insightStroke: NODE_STYLING.insight.stroke,
+    entityFill: nodeColor.value({ kind: 'entity' } as NetworkNode),
+    themeColor,
+  })
+  setStructuredHoverSuspended(false)
+  // The canvas becomes navigable again, and the opening move unwinds over the
+  // wheel's duration so the ring straightening and the view pulling back read as
+  // one motion.
+  releaseRouletteControls()
+  if (svgRef.value && zoomBehaviorInstance) {
+    const initial = computeInitialTransform()
+    zoomBehaviorInstance.scaleExtent([initial.k, VIEWPORT.zoomExtent[1]])
     d3.select(svgRef.value).transition().duration(STRUCTURED_FOCUS.rotationMs)
       .call(zoomBehaviorInstance.transform as any, initial)
   }
 }
 
-/** Any structured re-render rebuilds the SVG — discard stale focus state. */
+/** Any structured re-render rebuilds the SVG — discard stale drill-down state. */
 function resetStructuredFocusState() {
+  releaseRouletteControls()
   structuredFocusHandle = null
-  structuredOpenIds.length = 0
+  structuredSelectedIds.length = 0
   structuredFocusActive.value = false
   setStructuredHoverSuspended(false)
 }
@@ -2513,11 +2645,12 @@ function fitCameraToNodes(focusNodes: any[]) {
 
 function resetView() {
   if (!svgRef.value || !zoomBehaviorInstance) return
-  // Reset while the Structured focus is open = close it (which restores the
-  // dimmed overview AND animates the camera back to the initial framing).
-  if (props.layoutMode === 'structured' && structuredOpenIds.length) {
+  // Reset while the drill-down is open clears it first (restoring the dimmed
+  // overview and unwinding the wheel); the camera reset below then runs as it
+  // always does — the drill-down never moved the camera, so there is nothing of
+  // its own to unwind.
+  if (props.layoutMode === 'structured' && structuredSelectedIds.length) {
     closeStructuredFocus()
-    return
   }
   followInitialFit = false
   const svg = d3.select(svgRef.value)
@@ -2697,21 +2830,28 @@ defineExpose({
 }
 
 /*
- * STRUCTURED FOCUS — VIEWPORT-EDGE FADE.
- * While a cluster is focused, the composition (region circle, entities,
- * labels, its lines — everything the canvas draws) dissolves softly as it
- * approaches the TOP, BOTTOM and LEFT screen edges instead of ending
- * abruptly; the safe centre band stays fully opaque and the RIGHT edge is
- * deliberately unfaded. Screen-anchored on purpose: two composited CSS mask
- * gradients on the <svg> itself (a left ramp ∩ a top/bottom ramp), because
- * every drawable lives inside the zoom-transformed viewport group where an
- * SVG mask would travel with the camera instead of staying on the viewport
- * edge. Purely a rendering-layer effect — no data or layout involvement.
- * The band depth comes from STRUCTURED_FOCUS.edgeFadePx via v-bind.
+ * STRUCTURED DRILL-DOWN — VIEWPORT-EDGE FADE.
+ * The detail circle is deliberately wider than the canvas, so it has to read as
+ * a system CONTINUING past the viewport rather than as a diagram that ends. Both
+ * SIDE edges therefore dissolve: whatever the circle carries into the left or
+ * right band fades out instead of being cut off, and the top/bottom ramp does
+ * the same for the parts that run off vertically. The centre band stays fully
+ * opaque. Screen-anchored on purpose: two composited CSS mask gradients on the
+ * <svg> itself (a left+right ramp ∩ a top/bottom ramp), because every drawable
+ * lives inside the zoom-transformed viewport group, where an SVG mask would
+ * travel with the camera instead of staying on the viewport edge. Purely a
+ * rendering-layer effect — no data or layout involvement. The band depth comes
+ * from STRUCTURED_FOCUS.edgeFadePx via v-bind.
  */
 .network-graph-d3__canvas--edge-fade {
   -webkit-mask-image:
-    linear-gradient(to right, transparent 0, #000 v-bind(focusEdgeFade)),
+    linear-gradient(
+      to right,
+      transparent 0,
+      #000 v-bind(focusEdgeFade),
+      #000 calc(100% - v-bind(focusEdgeFade)),
+      transparent 100%
+    ),
     linear-gradient(
       to bottom,
       transparent 0,
@@ -2721,7 +2861,13 @@ defineExpose({
     );
   -webkit-mask-composite: source-in;
   mask-image:
-    linear-gradient(to right, transparent 0, #000 v-bind(focusEdgeFade)),
+    linear-gradient(
+      to right,
+      transparent 0,
+      #000 v-bind(focusEdgeFade),
+      #000 calc(100% - v-bind(focusEdgeFade)),
+      transparent 100%
+    ),
     linear-gradient(
       to bottom,
       transparent 0,

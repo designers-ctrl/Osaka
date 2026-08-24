@@ -18,6 +18,7 @@ import {
   INSIGHT_RING,
   getStructuredNodeRadius,
 } from '../structuredTokens'
+import { getInsightStrength } from '../../graphTokens'
 import { applyStructuredHoverIsolation } from '../structuredHover'
 import { NODE_STYLING } from '@/components/graphs/graphTokens'
 import type { PositionedNode } from '../useStructuredRenderer'
@@ -39,6 +40,14 @@ export function renderInsightRing(
   if (!insightNodes.length) return
 
   const nodeRadius = INSIGHT_RING.nodeRadius
+  /*
+   * PER-INSIGHT radius, from the SAME normalised strength the Unstructured
+   * field uses (getInsightStrength — real connection counts), mapped into this
+   * ring's own diameter window. Was one constant for every insight, which is
+   * why they all rendered identical here.
+   */
+  const radiusFor = (node: any) => (INSIGHT_RING.minDiameter
+    + getInsightStrength(node) * (INSIGHT_RING.maxDiameter - INSIGHT_RING.minDiameter)) / 2
   const chartTheme = _config.chartTheme
 
   // ── CREATE INSIGHT RING GROUP ──────────────────────────────────────────────
@@ -56,7 +65,7 @@ export function renderInsightRing(
     .attr('class', 'insight-node')
     .attr('cx', (d) => d.x || 0)
     .attr('cy', (d) => d.y || 0)
-    .attr('r', nodeRadius)
+    .attr('r', (d: any) => radiusFor(d))
     .attr('fill', chartTheme?.categorical?.[0] || '#F2C585') // Yellow accent (same as Unstructured view)
     .attr('stroke', NODE_STYLING.insight.stroke) // #7C6749 — shared with Unstructured rendering
     .attr('stroke-width', INSIGHT_RING.strokeWidth)

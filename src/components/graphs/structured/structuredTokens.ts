@@ -21,27 +21,27 @@ export const STRUCTURED_RINGS = {
   center: 0,
 
   // First ring: insights, uniform size.
-  // 120 trims the inner connection zone: the center content (avatar +
-  // sentiment rows) extends to ≈ 96 units below the origin, so 120 is the
-  // closest the insight ring can sit without curves crossing that content.
-  insight: 120,
+  // 190 keeps the ring proportional to the enlarged entity/cluster rings
+  // (≈ ×1.25 of the historical 120 floor plus extra clearance) while staying
+  // well outside the center content (avatar + sentiment rows, ≈ 96 units).
+  insight: 190,
 
   // Second ring: entity nodes, uniform size.
-  // 210 keeps compressing the Insight → Entity bundled-connection zone
-  // (radial distance 210 − 120 = 90 units). Packing: 62 summaries at the
-  // 18-unit entity diameter → pitch 2·210·sin(π/62) ≈ 21.3, gap ≈ 3.3 units
-  // — at its packing limit for the current entity size.
-  entity: 210,
+  // 382 gives the Insight → Entity bundled-connection zone real breathing
+  // room (radial distance 382 − 190 = 192 units). Packing for the current
+  // 90 summaries at the 18-unit entity diameter: pitch
+  // 2·382·sin(π/90) ≈ 26.7 → a ≈ 8.7-unit gap between neighbors.
+  entity: 382,
 
   // Outer ring: clusters with source icons, uniform size.
-  // 302 is the compactness floor for this ring at the 26-unit cluster
-  // diameter (STRUCTURED_NODE_SIZES.cluster): chord pitch
-  // 2·302·sin(π/62) ≈ 30.6 → a ~4.6-unit gap between neighbors. It also
-  // keeps the cluster → entity bridge compact: free corridor
-  // 302 − 13 − (210 + 9) = 70 units — the intrinsic ~59-unit badge plus
+  // 490 comfortably clears the packing floor for the current 90 clusters at
+  // the 26-unit cluster diameter (STRUCTURED_NODE_SIZES.cluster): chord
+  // pitch 2·490·sin(π/90) ≈ 34.2 → a ≈ 8.2-unit gap between neighbors.
+  // The cluster → entity bridge corridor stays generous:
+  // 490 − 13 − (382 + 9) = 86 units — the intrinsic ~59-unit badge plus
   // clearance. Cluster positions, bridge geometry and connection endpoints
   // all derive from this token; labels follow via CLUSTER_RING.label.arcDistance.
-  cluster: 302,
+  cluster: 490,
 }
 
 // ============================================================================
@@ -172,7 +172,17 @@ export const SENTIMENT_INDICATOR = {
 // Uniform-size insight nodes with optional badge
 
 export const INSIGHT_RING = {
-  // Fixed node styling
+  /*
+   * ── INSIGHT SIZE ON THE RING ────────────────────────────────────────────
+   * `nodeRadius` is the LAYOUT radius (spacing, endpoint trimming and the
+   * detail view all measure from it) — the drawn circle is per-insight, from
+   * the window below. The window sits strictly ABOVE the structured cluster
+   * diameter (STRUCTURED_NODE_SIZES.cluster = 26), so the hierarchy rule
+   * `max cluster < min insight` holds on the ring exactly as it does in the
+   * Unstructured field.
+   */
+  minDiameter: 28,
+  maxDiameter: 38,
   nodeRadius: STRUCTURED_NODE_SIZES.insight / 2,
   fill: 'theme', // Will resolve via chartTheme (categorical[0])
   stroke: '#7C6749',
@@ -318,7 +328,34 @@ export const CLUSTER_RING = {
     fill: '#FFFFFF',
     opacity: 0.85,
     // Arc placement: distance from cluster node edge
-    arcDistance: 20, // px beyond cluster circle
+    /**
+     * BASE radial offset beyond the cluster ring, in viewBox units — the
+     * label's resting distance, and the CEILING of the zoom-aware rule below
+     * (a label never sits farther out than this).
+     */
+    arcDistance: 28, // px beyond cluster circle — scaled with the larger ring
+    /**
+     * ── ZOOM-AWARE LABEL DISTANCE ──────────────────────────────────────────
+     * The offset above is a WORLD distance, so on screen it scaled with the
+     * camera: ~8px at the fit view but ~47px zoomed in, which detached every
+     * label from its node. These two tokens turn it into a constant-SCREEN
+     * gap instead — see getStructuredClusterLabelRadius():
+     *
+     *   effectiveArc(k) = clamp(nodeRadius − sideOffset + screenGap / k,
+     *                           minArcDistance, arcDistance)
+     *
+     * `screenGap` is the ON-SCREEN px kept between the node's edge and the
+     * start of its text. At the fit view the formula saturates at
+     * `arcDistance`, so the default framing renders exactly as before.
+     */
+    screenGap: 11,
+    /**
+     * Floor for the effective offset. Must stay above
+     * `nodeRadius − sideOffset` (13 − 6 = 7) or the text would cross into the
+     * node; 10 keeps a 3-unit margin, which is ~12 screen px at max zoom-in —
+     * so a label can never touch the source icon at any zoom level.
+     */
+    minArcDistance: 10,
     // Hemisphere-aware: left side text reads left→right, right side reads right→left
   },
 }
@@ -436,6 +473,30 @@ export const STRUCTURED_HOVER = {
  * a hardcoded absolute. Smoothstep easing, so zooming out and back in glides
  * between the two sizes with no breakpoint jump.
  */
+/**
+ * THE cluster-label radial placement rule, shared by the initial render
+ * (renderClusterRing) and the NetworkGraphD3 structured zoom branch so the
+ * two cannot diverge — the same contract getStructuredClusterLabelFontSize
+ * has for the type size.
+ *
+ * Returns the label group's radius from the ring centre. Only the RADIUS is
+ * zoom-aware: the spoke angle, the hemisphere flip and the text anchoring are
+ * untouched, so radial orientation reads exactly as before. Ring geometry is
+ * never modified — `STRUCTURED_RINGS.cluster` is read, not written.
+ */
+export function getStructuredClusterLabelRadius(zoomScale: number): number {
+  const label = CLUSTER_RING.label
+  const k = zoomScale > 0 ? zoomScale : 1
+  const arc = Math.min(
+    label.arcDistance,
+    Math.max(
+      label.minArcDistance,
+      CLUSTER_RING.nodeRadius - label.sideOffset + label.screenGap / k,
+    ),
+  )
+  return STRUCTURED_RINGS.cluster + arc
+}
+
 export function getStructuredClusterLabelFontSize(
   zoomScale: number,
   minZoomScale: number,
@@ -495,198 +556,274 @@ export const CLUSTER_ENTITY_BRIDGE = {
 }
 
 // ============================================================================
-// CLUSTER FOCUS (horizontal drill-down)
+// CLUSTER DRILL-DOWN — ROULETTE RING + FIXED DETAIL VIEWPORT
 // ============================================================================
-// Clicking a cluster keeps the radial graph as dimmed context on the left and
-// expands `Cluster → Insights → Entities` as a horizontal hierarchy on the
-// right (see structuredFocus.ts). All positions are DATA units in the same
-// coordinate space as the rings; label px values are ON-SCREEN sizes, divided
-// by the camera scale at render/zoom time (the structured constant-screen
-// convention).
+// Clicking a cluster does TWO things, and neither of them moves the camera:
+//
+//   1. the ring turns like a roulette wheel until the selected cluster reaches
+//      `focusAngleDeg`. The circle stays centred and stays the same size; only
+//      its content rotates (the rotor — see useStructuredRenderer);
+//   2. that cluster's Insights + Entities are drawn in ONE FIXED DETAIL ZONE,
+//      always at the same place on screen. Selecting another cluster replaces
+//      the CONTENT of that zone; the zone itself never moves.
+//
+// ⚠️ TWO COORDINATE SYSTEMS. The ring is in DATA units inside the camera. The
+// detail zone lives OUTSIDE the zoom-transformed viewport group, so its numbers
+// are viewBox units (STRUCTURED_VIEWPORT.dataWidth × dataHeight) and are NEVER
+// divided by the camera scale — that is what makes it immovable under pan and
+// zoom. Do not mix the two.
 
 export const STRUCTURED_FOCUS = {
-  /** Camera + layer + dim transition duration (ms). */
+  /** Layer + dim transition duration (ms). */
   transitionMs: 450,
 
   /**
-   * FOCUS BY ROTATION. Clicking a cluster does NOT lift it out of the ring
-   * (that read as a detached duplicate and left a hole where it had been):
-   * the whole radial graph rotates until that cluster sits horizontally on
-   * the focus side, and the drill-down columns extend from it. The clicked
-   * node stays the same element in the ring, with its identity, icon, label
-   * and relationships intact.
+   * THE ROULETTE. The ring turns until the selected cluster sits at this angle
+   * (the view's convention: 0° = East, 180° = West). 0° because the wheel is
+   * parked off the LEFT edge of the canvas — its East point is the part nearest
+   * the detail area, so that is where a selected cluster belongs, with its
+   * content opening to the right of it.
    *
-   * `focusAngleDeg` is where the cluster lands, in the view's angle
-   * convention (0° = East / 3 o'clock — horizontal, on the right, which is
-   * the side the columns extend toward).
+   * The clicked node is never lifted out of the ring or duplicated: the rotor
+   * turns as one rigid body, so every node's element, datum, icon, label and
+   * relationships are untouched, and the wheel's centre and radius never change.
    */
   focusAngleDeg: 0,
-  /** Rotation easing duration (ms); the camera uses `transitionMs`. */
+  /** How long the wheel takes to turn (ms). */
   rotationMs: 700,
 
   /**
-   * How many clusters may be expanded AT ONCE.
-   *
-   * Rotation can only bring one cluster to the focus side, so with several open
-   * the rest fan outward along their own radii (see structuredFocus.ts) — and
-   * that only stays readable for a handful. Opening one past the cap closes the
-   * OLDEST rather than refusing the click, so a click always does something
-   * visible and the newest cluster is always the one in focus.
-   */
-  maxOpen: 4,
-
-  /**
-   * Angular de-collision between simultaneously open fans.
-   *
-   * A fan needs roughly `minSeparationDeg` of angular room at its outer end,
-   * while the cluster ring's own pitch is ~5.8° (62 clusters) — so two clusters
-   * opened near each other would draw their columns on top of one another. A new
-   * fan steps away in `offsetStepDeg` increments, up to `maxOffsetDeg`; past
-   * that it overlaps rather than flying off somewhere unrelated to its own
-   * cluster. Incumbent fans never move.
-   */
-  fan: {
-    minSeparationDeg: 22,
-    maxOffsetDeg: 14,
-    offsetStepDeg: 3.5,
-  },
-
-  /**
-   * VIEWPORT-EDGE FADE while focused: the on-screen depth (px) of the soft
-   * transparency ramp at the TOP, BOTTOM and LEFT viewport edges. Applied as
-   * a screen-anchored CSS mask on the canvas (NetworkGraphD3 `--edge-fade`
-   * class), so anything the focus composition pushes toward those edges
-   * dissolves gradually instead of clipping; the centre stays fully opaque
-   * and the right edge is deliberately unfaded.
+   * VIEWPORT-EDGE FADE while a cluster is open: the on-screen depth (px) of the
+   * soft transparency ramp at the TOP, BOTTOM and LEFT viewport edges, applied
+   * as a screen-anchored CSS mask on the canvas (NetworkGraphD3 `--edge-fade`).
    */
   edgeFadePx: 140,
 
   /**
-   * The root is the cluster AT ITS RING POSITION after rotation, so the
-   * columns start from the ring's edge rather than from an arbitrary x.
-   */
-  rootX: STRUCTURED_RINGS.cluster,
-  /**
-   * Horizontal gaps: root → insight column, insight → entity column.
-   * Sized so the whole chain (both gaps + `leafLabelReserve`) still fits the
-   * canvas space right of `camera.anchorFraction` at the zoomed-IN scale —
-   * widen these and the camera clamp below will cancel the zoom-in to keep the
-   * columns on screen.
-   */
-  columnGap: { insights: 200, leaves: 240 },
-  /**
-   * Vertical pitch inside each column, in ON-SCREEN px — like `label.fontSize`
-   * and for the same reason.
+   * ── SELECTION IS A HIGHLIGHT, NOT A DIM ──────────────────────────────────
    *
-   * Row pitch has to be measured in the same units as the thing it separates,
-   * and what it separates is TEXT, which is constant-screen. As data units the
-   * pitch shrank with the camera while the labels did not, so as soon as the
-   * camera zoomed out to frame several open fans the rows collided — the pitch
-   * fell to ~11px against a 12px font. In screen px the gap the reader sees is
-   * the gap that is configured, at any zoom.
+   * Opening a cluster does NOT fade the wheel down any more. Every cluster,
+   * ring and connection stays at its resting appearance — the wheel is the
+   * navigation control, so it has to stay readable while you use it — and the
+   * selected cluster is marked instead: a halo behind its node in the accent,
+   * with a glow around it.
    *
-   * These values reproduce the previous single-cluster spacing exactly: 52 and
-   * 40 data units at that view's 0.742 scale.
+   * The colour is the chart theme's second categorical step (#9D7EEA), passed
+   * in live by the caller; the literal here is only the pre-resolve mirror of
+   * it, per the DS convention for values that must survive without a theme.
    */
-  rowGap: { insights: 39, leaves: 30 },
-
-  /** The dimmed radial overview while focused ("strongly dimmed"). */
-  dimmedOverview: 0.12,
-  /**
-   * The overview's connection MESH while focused: hidden, not dimmed —
-   * hundreds of faint lines buried the drill-down (near-zero rather than 0
-   * so the elements stay cheaply animatable back to their resting state).
-   */
-  overviewConnectionOpacity: 0.015,
-  /**
-   * The focused cluster stays EXACTLY as it is drawn in the ring — same
-   * position, same size. Kept at 1 so every geometry helper that reads it
-   * (line trimming, the root label offset) still has one place to look.
-   */
-  rootScale: 1,
-
-  label: {
-    fontFamily: 'Google Sans Flex',
-    fontSize: 12, // on-screen px — constant-screen via the zoom branch
-    fontWeight: 400,
-    rootFontSize: 14, // on-screen px
-    rootFontWeight: 500,
-    rootOffsetY: 10, // on-screen px below the root circle
-    maxWidth: 170, // on-screen px before ellipsis truncation
-    gap: 8, // on-screen px between a dot and its label
+  selection: {
     /**
-     * Estimated advance per character, as a fraction of font size — the same
-     * idiom (and value) as EXPANDED_CLUSTER.entity.estCharWidth. Used to size a
-     * column's row pitch from the labels it carries WITHOUT a measure-then-
-     * reflow pass, so the layout stays deterministic across reloads.
+     * ⚠️ The accent is no longer painted onto the selected node — the node
+     * keeps its own logo and ring styling (the design review found the accent
+     * fill read as the node being replaced by a generic dot). The selection is
+     * marked by the soft neutral glow on `.structured-selection-layer`
+     * (structuredFocus.ts, at the layer's creation) and the expanded region
+     * beside the node. The token stays for the accent's other users.
      */
-    estCharWidth: 0.62,
-    /** Line box as a multiple of font size — the vertical half of that estimate. */
-    lineHeightFactor: 1.35,
-    ink: 'rgba(255, 255, 255, 0.9)',
+    fillToken: 'graph-accent',
+    colorFallback: '#9D7EEA',
+    opacity: 0.6,
+    /** Halo radius as a multiple of the cluster node's own radius. */
+    radiusScale: 1.7,
+    /**
+     * Glow blur, in the same constant-screen unit every other size in this
+     * layer uses: divided by the camera scale when applied, so it holds its
+     * apparent size through zoom. (SVG filters work in user space, so the
+     * viewBox's own fit scale still applies on top — as it does to the type.)
+     */
+    glowPx: 6,
+
+    /**
+     * ── RELATIONSHIP-BASED FOCUS DIM ─────────────────────────────────────
+     * While a cluster is selected, wheel clusters split by the REAL
+     * relationship data: related ones stay at their normal active state,
+     * unrelated ones drop to these values — present as context, clearly
+     * secondary, never removed. Restored in full when the selection closes.
+     */
+    unrelated: {
+      /** The whole cluster group (circle + logo). */
+      nodeOpacity: 0.25,
+      /** Its radial category label — muted harder than the node. */
+      labelOpacity: 0.16,
+      /** Its entity summary, bridge and count badge. */
+      satelliteOpacity: 0.2,
+    },
   },
 
   /**
-   * Focus connections use the SAME visual language as an Unstructured
-   * connection — the shared luminous gradient paint server, the base link
-   * stroke scale, and the base opacity ramp (resting / hover / hidden), with
-   * hover highlighting wired through the same interaction helper. Straight
-   * single segments, as everywhere else in this app.
+   * ── THE WHEEL AND THE FIXED DETAIL AREA ───────────────────────────────────
+   *
+   * Structured drill-down is a two-part screen that never moves:
+   *
+   *   ╭───────┬──────────────────────────────┐
+   *   │ wheel │  detail area (fixed)         │  ← the ring, parked off the left
+   *   │    ◝  │  entities + insights         │    edge so about half of it shows
+   *   ╰───────┴──────────────────────────────┘
+   *
+   * The wheel is the NAVIGATION control: it rotates (scroll or drag) to bring
+   * clusters round to its East point, and clicking one fills the detail area.
+   * The camera is placed once, is identical for every cluster, and is frozen
+   * while the drill-down is open — there is no panning or zooming in this mode,
+   * so the detail area is fixed in the strongest sense available.
+   *
+   * ⚠️ TWO COORDINATE SYSTEMS. The wheel and the detail layer are both inside
+   * the camera, so their units are DATA units; the zone below is expressed in
+   * viewBox fractions and converted through the fixed camera at layout time.
+   * On-screen sizes (type, mark radii, gaps) are divided by the camera scale.
+   */
+  detail: {
+    /**
+     * WHERE THE WHEEL SITS. Its centre is placed past the LEFT edge of the
+     * canvas (x < 0) so the ring is cropped: only the arc nearest the detail
+     * area is on screen — a wheel you turn, not a diagram you read whole. The
+     * scale comes from `radiusFitFraction`: the ring's radius as a fraction of
+     * the viewBox's smaller side.
+     */
+    wheel: {
+      /*
+       * Parked further past the left edge (was -0.05) so the ring is cropped
+       * harder and its rim + category labels stop reaching into the middle of
+       * the canvas — the detail area keeps its own fixed bounds, but the band
+       * in front of it is no longer crowded by the wheel.
+       *
+       * ONLY the horizontal anchor moved: `centerYFraction` keeps the wheel
+       * vertically centred and `radiusFitFraction` keeps its radius (and so
+       * the zoom, the rotation and every cluster's position on the rim)
+       * exactly as before.
+       */
+      centerXFraction: -0.16,
+      centerYFraction: 0.5,
+      radiusFitFraction: 0.49,
+    },
+
+    /**
+     * THE PIN COLUMN, as a viewBox fraction across. A selected cluster is lifted
+     * out of the wheel and parked here — clear of the rim, where it would
+     * otherwise sit among the clusters it just left and read as still being one
+     * of them. Everything in its band is measured from this point.
+     */
+    pinColumnX: 0.40,
+
+    /**
+     * The detail area, in viewBox fractions (x0/x1 across, y0/y1 down). It
+     * begins just clear of the pin column — close enough that the field reads
+     * as coming OUT of the selected cluster, with no dead band between them —
+     * and stops short of the canvas edge on purpose: a dot sits at its column's
+     * centre and its label runs RIGHT from it, so the last column needs a
+     * label's width of canvas beyond it or every name there gets clipped.
+     */
+    zone: { x0: 0.52, x1: 0.96, y0: 0.08, y1: 0.92 },
+
+    /**
+     * The insight column, as a viewBox fraction across — between the pinned
+     * cluster and the detail field, so the chain reads cluster → insight →
+     * entities running outward from the pin.
+     */
+    insightColumnX: 0.47,
+
+    /**
+     * ORGANIC SCATTER. Entities are placed on a jittered grid: the grid is what
+     * guarantees they stay separated and readable, and the per-item jitter —
+     * derived from each id's own hash, never `Math.random()` (a house rule), so
+     * a cluster looks identical every time it is opened — is what stops the
+     * field reading as a table. The value is the fraction of a cell an item may
+     * wander; beyond ~0.4 neighbours start touching.
+     */
+    scatter: {
+      /**
+       * Two axes, deliberately unequal. Horizontal wander is free — a name has
+       * its whole cell to sit in — but VERTICAL wander is what makes labels
+       * collide, because rows are only a line-height apart. Half the jitter
+       * across keeps the field organic while the rows stay legible.
+       */
+      jitterX: 0.18,
+      jitterY: 0.09,
+    },
+
+    /** Constant-screen mark radii (px) — divided by the camera scale at render. */
+    entityScreenRadius: 4.5,
+    insightScreenRadius: 5.5,
+    /** On-screen px below the cluster node for its category caption. */
+    captionOffsetY: 26,
+
+    /**
+     * Breathing room between two selections' bands, in data units. Selecting a
+     * second cluster splits the zone in two; this is what keeps the lower band's
+     * top row clear of the upper band's last one.
+     */
+    bandGap: 60,
+
+    /**
+     * Past this many pinned clusters the cross-cluster relation lines switch to
+     * the DASHED language — with two selections there is one relationship to
+     * read and a solid line is clearest, but with three the lines cross each
+     * other and the bands they belong to, and the dashes are what separate a
+     * derived entity↔entity relation from the solid chains beneath it. The
+     * pattern itself is the shared `EXPANDED_CLUSTER.entityRelation` one, so
+     * Structured and Unstructured dash identically.
+     */
+    dashRelationsAbove: 2,
+
+    /**
+     * How many clusters may be pinned at once. Each takes a band of the fixed
+     * zone, so past a handful every field is too short to read — and the point
+     * of pinning is comparison, not accumulation.
+     */
+    maxSelected: 3,
+
+    /**
+     * ROULETTE SCROLL: degrees of wheel rotation per unit of wheel delta. Scroll
+     * REPLACES zoom while the drill-down is open — the canvas is not navigable
+     * in this mode, the wheel is.
+     */
+    scrollDegPerUnit: 0.14,
+  },
+
+  /**
+   * The ENTITY marks. Not a Structured invention: a drill-down entity IS an
+   * expanded entity — the same kind of node — so it reuses the Unstructured
+   * `expanded-entity` tokens outright rather than carrying an approximation of
+   * them. The FILL is not a token in either place: it is resolved live from the
+   * theme by the same `nodeColor({ kind: 'entity' })` call and passed in.
+   */
+  leaf: EXPANDED_CLUSTER.entity,
+
+  /**
+   * Detail connections use the SAME visual language as every other connection
+   * in the app — the shared luminous gradient paint server, the base stroke
+   * scale and the base opacity ramp (resting / hover / hidden). Straight
+   * single segments, as everywhere else.
    */
   line: {
     stroke: `url(#${LINK_GRADIENT.foreground.id})`,
     baseWidth: LINK_STYLING.strokeWidth.default,
-    /**
-     * Focus links draw THINNER than the shared base width: the fan is a short
-     * read-out beside the graph, and at the focus camera's zoom the base
-     * width read as heavy rules rather than connections. Proportional — the
-     * background/glow keeps its ×1.5 relation, and the hover thicken keeps
-     * its ×1.3 — and scoped to the focus layer only (the overview mesh and
-     * the Unstructured graph never see it).
-     */
+    /** Detail links draw thinner: the zone is a compact read-out. */
     widthFactor: 0.6,
-    endpointGap: 4, // data units between a line end and its node edge
+    /** viewBox units between a line end and the node edge it points at. */
+    endpointGap: 3,
     opacity: LINK_STYLING.opacity,
   },
 
-  /**
-   * The right-hand ENTITY marks. Not a Structured invention: a focus leaf IS an
-   * expanded entity — the same kind of node, drilled down to — so it reuses the
-   * Unstructured `expanded-entity` tokens outright rather than carrying its own
-   * approximation of them. Radius, its on-screen floor, resting opacity and the
-   * hover dim all come from EXPANDED_CLUSTER.entity; the FILL is not a token at
-   * all in either place — it is resolved live from the theme by the same
-   * `nodeColor({ kind: 'entity' })` call the drill-down uses, and passed in.
-   */
-  leaf: EXPANDED_CLUSTER.entity,
-
-  /** Data-unit reserve past the last column for its labels (camera bounds). */
-  leafLabelReserve: 260,
-
-  /**
-   * FOCUS CAMERA — the radial graph shifts LEFT and the view zooms IN slightly,
-   * as one move alongside the rotation.
-   *
-   * The zoom is expressed RELATIVE to the overview's own fit scale (the same
-   * formula the Structured initial camera uses), so "zoom in" means in whatever
-   * that fitted scale happens to be. This replaced a fit-everything camera that
-   * framed the ring AND the columns together: fitting a much wider box than the
-   * ring alone necessarily zoomed OUT (≈0.43–0.52 against an overview of
-   * ≈0.62), making the focused side smaller and less readable — the opposite of
-   * the intent.
-   */
-  camera: {
-    /** Multiplier on the overview's fit scale. > 1 = zoom in. */
-    zoomInFactor: 1.2,
+  label: {
+    fontFamily: 'Google Sans Flex',
+    fontSize: 9,
+    fontWeight: 400,
+    rootFontSize: 13,
+    rootFontWeight: 500,
+    /** viewBox units below the root mark for the cluster's category. */
+    rootOffsetY: 10,
+    /** viewBox units between a dot and its label — tight, so the name reads as
+     * belonging to that dot rather than floating beside it. */
+    gap: 4,
     /**
-     * Where the focused cluster lands across the canvas width (0 = left edge,
-     * 1 = right edge). The ring slides left past the edge — deliberately: the
-     * focus reads as a fan opening from the left — and the columns take the
-     * remaining right-hand space.
+     * Before ellipsis truncation, on screen. It is also what SIZES the detail
+     * field's columns (see `layoutDetail`): a column is never narrower than a
+     * full label, so raising this widens the cells and drops a column rather
+     * than squeezing names into ellipses.
      */
-    anchorFraction: 0.32,
-    /** Share of canvas height the tallest focus column may occupy. */
-    verticalFill: 0.86,
+    maxWidth: 84,
+    ink: 'rgba(255, 255, 255, 0.9)',
   },
 }
 
@@ -707,18 +844,17 @@ export const STRUCTURED_VIEWPORT = {
   // Furthest visual extent from the graph origin, sized to the graph's
   // ACTUAL bounds — not a worst-case reserve. The cluster ring's radial
   // category labels start at STRUCTURED_RINGS.cluster + label.arcDistance + 6
-  // (≈ 328, see renderClusterRing). Labels are constant-screen (12px font),
+  // (≈ 524, see renderClusterRing). Labels are constant-screen (12px font),
   // and the longest CURRENT category ("Organizations", 13 chars) measures
   // ≈ 82px on screen. At the resulting initial fit scale of
-  // min(800,600) / (2 × (475 + 10)) ≈ 0.619 that is ≈ 133 data units →
-  // extent ≈ 461 ≤ 475, with ~9px of on-screen headroom. Reserving the full
-  // 120px truncation cap instead would shrink every node — revisit this
-  // value only if longer categories are added (labels beyond ≈ 92px on
-  // screen would clip).
+  // min(800,600) / (2 × (755 + 10)) ≈ 0.392 that is ≈ 209 data units →
+  // extent ≈ 733 ≤ 755, with ~8px of on-screen headroom. Revisit this value
+  // only if longer categories are added (labels beyond ≈ 90px on screen
+  // would clip).
   // The Structured initial camera (NetworkGraphD3.computeInitialTransform,
   // structured branch) centers and fits THIS radius — never the Unstructured
   // camera or container-px math.
-  outerRadius: 475,
+  outerRadius: 755,
   // Breathing room (data units) kept around the outer radius when fitting.
   fitPadding: 10,
 }

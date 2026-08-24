@@ -64,13 +64,23 @@ function groupOf(node: any): string | null {
  *                  hub neighborhoods; pulled tighter so related groups stay close
  * - 'default'    — everything else
  */
-function linkClass(link: any): 'bond' | 'crossGroup' | 'default' {
+function linkClass(link: any): 'bond' | 'bridge' | 'crossGroup' | 'default' {
   if (link.kind === 'overlap') return 'bond'
   const s = link.source
   const t = link.target
   // Accessors run after forceLink resolves ids to node objects; guard anyway.
   if (typeof s !== 'object' || typeof t !== 'object') return 'default'
   if (s.kind === 'insight' || t.kind === 'insight') return 'crossGroup'
+  // A DIRECT cluster↔cluster link between two groups is a 'bridge': unlike an
+  // insight-mediated crossGroup link it connects two dense rings directly, so
+  // pulling with crossGroup's strength dragged whole groups onto each other and
+  // laid the line across their clusters. Bridges hold the network together on a
+  // long, soft leash instead.
+  if (s.kind === 'cluster' && t.kind === 'cluster') {
+    const gs2 = groupOf(s)
+    const gt2 = groupOf(t)
+    if (gs2 && gt2 && gs2 !== gt2) return 'bridge'
+  }
   const gs = groupOf(s)
   const gt = groupOf(t)
   if (gs && gt && gs !== gt) return 'crossGroup'
@@ -1253,6 +1263,7 @@ export function useD3Force() {
         .strength((link: any) => {
           switch (linkClass(link)) {
             case 'bond': return FORCE_SIMULATION.clusterBondStrength
+            case 'bridge': return FORCE_SIMULATION.clusterBridgeStrength
             case 'crossGroup': return FORCE_SIMULATION.crossGroupStrength
             default: return linkStrength
           }
@@ -1261,6 +1272,7 @@ export function useD3Force() {
         .distance((link: any) => {
           switch (linkClass(link)) {
             case 'bond': return FORCE_SIMULATION.clusterBondDistance
+            case 'bridge': return FORCE_SIMULATION.clusterBridgeDistance
             case 'crossGroup': return FORCE_SIMULATION.crossGroupDistance
             default: return FORCE_SIMULATION.linkDistance
           }

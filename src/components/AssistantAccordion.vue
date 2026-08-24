@@ -55,7 +55,7 @@
 -->
 
 <script setup lang="ts">
-  import { computed, reactive } from 'vue'
+  import { computed } from 'vue'
 import SourceChip, { type SourceRef } from '@/components/SourceChip.vue'
   import { documentIconFor } from '@/data/documentIcon'
 
@@ -69,43 +69,27 @@ import SourceChip, { type SourceRef } from '@/components/SourceChip.vue'
     document?: { name: string, ext?: string }
   }
 
-  /** A nested sub-accordion — one level deep, same items vocabulary. */
-  export interface AssistantAccordionChild {
-    id: string
-    title: string
-    items?: AssistantAccordionItem[]
-  }
 
   export interface Props {
     title: string
     items?: AssistantAccordionItem[]
-    /**
-     * Nested accordions rendered inside this one's panel (a decomposition
-     * step parenting its sub-questions). Each child is a full
-     * AssistantAccordion — own caret, own items, own chips — and starts
-     * COLLAPSED; opening the parent reveals only the list of child headers.
-     */
-    children?: AssistantAccordionChild[]
   }
 
   const props = withDefaults(defineProps<Props>(), {
     items: () => [],
-    children: () => [],
   })
 
   /** Expansion state — bindable, but self-managed when the parent doesn't. */
   const open = defineModel<boolean>({ default: false })
 
-  /** No items AND no children = a status line, not a disclosure. */
-  const hasItems = computed(() =>
-    (props.items?.length ?? 0) > 0 || (props.children?.length ?? 0) > 0)
-
   /**
-   * Child expansion, self-managed and collapsed by default: entries appear in
-   * this record the first time a child is toggled; absent = closed (the
-   * child's own model default).
+   * No items = a STATUS LINE, not a disclosure: no chevron, no button, no
+   * click. This is what renders "Processing question", "Decomposed into 3
+   * sub-questions:" and "Finished" as plain step labels — a chevron on a step
+   * that discloses nothing would be a control that does nothing.
    */
-  const childOpen = reactive<Record<string, boolean>>({})
+  const hasItems = computed(() => (props.items?.length ?? 0) > 0)
+
 
   const documentRef = (doc: { name: string, ext?: string }): SourceRef[] =>
     [{ name: doc.name, icon: documentIconFor(doc.ext) }]
@@ -159,22 +143,6 @@ import SourceChip, { type SourceRef } from '@/components/SourceChip.vue'
           </li>
         </ol>
 
-        <!--
-          Nested sub-accordions, one indent step off the parent's rail — the
-          same 28px the item rows use, so children and items align. Each child
-          is a real AssistantAccordion: own dot, own connector runs (the stack
-          gap matches --aa-stack-gap, so their bridges meet exactly), own
-          expand/collapse.
-        -->
-        <div v-if="children.length" class="assistant-accordion__children">
-          <assistant-accordion
-            v-for="child in children"
-            :key="child.id"
-            v-model="childOpen[child.id]"
-            :title="child.title"
-            :items="child.items"
-          />
-        </div>
       </div>
     </v-expand-transition>
   </div>
@@ -455,13 +423,13 @@ import SourceChip, { type SourceRef } from '@/components/SourceChip.vue'
     /* Starts at the dot's BOTTOM edge, so the dot reads as the node. */
     top: calc(var(--aa-item-dot-top) + var(--aa-item-dot));
     bottom: 0;
-    width: 4px; /* the dot tile's cross-axis size — a 1px slice would clip it */
+    width: 1.5px; /* thinner connector; the tile below matches so dots stay centred */
     background-image: radial-gradient(
       circle,
       var(--aa-line) var(--aa-item-line) ,
       transparent calc(var(--aa-item-line) + 0.2px)
     );
-    background-size: 4px 5px;
+    background-size: 1.5px 5px;
     background-repeat: repeat-y;
   }
 
@@ -473,13 +441,14 @@ import SourceChip, { type SourceRef } from '@/components/SourceChip.vue'
     transform: translateX(-50%);
     top: 100%;
     height: calc(var(--aa-items-gap) + var(--aa-item-dot-top));
-    width: 4px;
+    /* Matches ::before — otherwise the run would visibly widen across gaps. */
+    width: 1.5px;
     background-image: radial-gradient(
       circle,
       var(--aa-line) var(--aa-item-line) ,
       transparent calc(var(--aa-item-line) + 0.2px)
     );
-    background-size: 4px 5px;
+    background-size: 1.5px 5px;
     background-repeat: repeat-y;
   }
 
@@ -503,13 +472,6 @@ import SourceChip, { type SourceRef } from '@/components/SourceChip.vue'
   }
 
   /* Nested sub-accordions: the items' indent, the accordions' stack gap. */
-  .assistant-accordion__children {
-    padding: 12px 0 0 28px;
-    display: flex;
-    flex-direction: column;
-    gap: 16px;
-  }
-
   .assistant-accordion__chips {
     display: flex;
     flex-wrap: wrap;

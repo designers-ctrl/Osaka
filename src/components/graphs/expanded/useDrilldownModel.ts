@@ -218,7 +218,7 @@ export function getRegionRadius(entityCount: number): number {
  * The outward direction an externally-connected entity should face, plus the
  * tangential slot that keeps entities sharing a direction from stacking.
  */
-interface ExternalBias {
+export interface ExternalBias {
   /** Preferred angle (radians) from the region centre toward the partner(s). */
   angle: number
   /** Deterministic offset within the arc, so co-directional entities spread. */
@@ -268,7 +268,67 @@ export function angleDiff(a: number, b: number): number {
 }
 
 /** An axis-aligned rectangle in region-local coordinates. */
-interface ReservedBox { x1: number, y1: number, x2: number, y2: number }
+export interface ReservedBox { x1: number, y1: number, x2: number, y2: number }
+
+/**
+ * Build the OUTER-ANNULUS biases for a region's externally-connected entities:
+ * each gets a preferred angle toward its partner(s), a tangential slot so
+ * co-directional entities spread along the arc instead of stacking on one
+ * point, and an id-seeded depth across the band.
+ *
+ * SHARED between the Unstructured drill-down (deriveDrilldown) and the
+ * Structured focus layer — one implementation of "externally connected
+ * entities sit on the edge facing their target", so the two modes cannot
+ * drift apart.
+ *
+ * Angular variation is a fan EXPANSION, never a rotation: the bucket's slot
+ * spacing is widened by an id-seeded factor, so the group is not a stamped
+ * arc, while every intra-bucket gap can only grow. (Rotating instead regressed
+ * spacing — a lone entity's rotation can walk it into a neighbouring bucket's
+ * entity; two collapsed to a 2.2px gap that way, against a 6.9px baseline.)
+ */
+export function deriveExternalBiases(
+  entries: Array<{ id: string, targets: Array<{ x: number, y: number }>, targetIds: string[] }>,
+  anchor: { x: number, y: number },
+): Map<string, ExternalBias> {
+  const { arcSpread, slotSpacing, angleJitter } = EXPANDED_CLUSTER.entity.externalBias
+  const biases = new Map<string, ExternalBias>()
+  const directed = entries
+    .map((entry) => {
+      // Several partners → the average direction (their barycentre).
+      const mx = entry.targets.reduce((sum, t) => sum + t.x, 0) / entry.targets.length
+      const my = entry.targets.reduce((sum, t) => sum + t.y, 0) / entry.targets.length
+      return { ...entry, angle: Math.atan2(my - anchor.y, mx - anchor.x) }
+    })
+    // Deterministic order: by angle, ties broken by id.
+    .sort((a, b) => a.angle - b.angle || (a.id < b.id ? -1 : 1))
+
+  // Bucket co-directional entities, then fan each bucket symmetrically
+  // around its shared angle.
+  const buckets = new Map<number, typeof directed>()
+  for (const entry of directed) {
+    const key = Math.round(entry.angle / (slotSpacing * 2))
+    if (!buckets.has(key)) buckets.set(key, [])
+    buckets.get(key)!.push(entry)
+  }
+  for (const bucket of buckets.values()) {
+    const half = (bucket.length - 1) / 2
+    const spread = slotSpacing * (1 + hashFraction(bucket[0].id, 'angle') * angleJitter)
+    bucket.forEach((entry, index) => {
+      const offset = (index - half) * spread
+      biases.set(entry.id, {
+        angle: entry.angle,
+        // Never seed outside the arc the projection would clamp to anyway.
+        slotOffset: Math.max(-arcSpread, Math.min(arcSpread, offset)),
+        radiusFraction: hashFraction(entry.id, 'radius'),
+        targetIds: entry.targetIds,
+      })
+    })
+  }
+  return biases
+}
+
+
 
 /**
  * The CENTERED category chip's reserved rectangle — a hard NO-ENTITY zone.
@@ -282,7 +342,7 @@ interface ReservedBox { x1: number, y1: number, x2: number, y2: number }
  * The box is inflated so a dot's EDGE (radius + collide padding) clears the
  * chip's own collision pad, matching the label-avoidance box in the renderer.
  */
-function chipReservedBox(category: string | null | undefined): ReservedBox | null {
+export function chipReservedBox(category: string | null | undefined): ReservedBox | null {
   if (!category) return null
   const chip = EXPANDED_CLUSTER.chip
   const entity = EXPANDED_CLUSTER.entity
@@ -303,7 +363,13 @@ function chipReservedBox(category: string | null | undefined): ReservedBox | nul
   }
 }
 
-function packEntities(
+/*
+ * ⚠️ SHARED with the Structured focus layer (structuredFocus.ts): a cluster
+ * opened in Structured renders THIS packing inside its expanded region, so the
+ * two modes' expanded clusters are one layout implementation. Changing the
+ * packing changes both — which is the point.
+ */
+export function packEntities(
   clusterId: string,
   entities: ExpandedEntityNode[],
   radius: number,
@@ -964,58 +1030,61 @@ export function deriveDrilldown(
     }
   }
 
+  /*
+   * ── INSIGHT ANCHORS, DECIDED BEFORE THE BIAS PASS ────────────────────────
+   * An Insight linked to an expanded region lands on ONE entity inside it
+   * (`Insight → entity`). That anchor used to be picked further down, AFTER
+   * packing — so the chosen entity had no idea it carried an outward line and
+   * stayed wherever the internal distribution put it, and the line cut clean
+   * across the disc to reach it.
+   *
+   * The pick is made here instead, keyed by the same (insight, cluster) hash,
+   * and registered as an EXTERNAL TARGET. From that point the existing bias
+   * pass owns it: outer annulus, facing the insight, fanned against
+   * co-directional siblings, then the same collision pass everything else
+   * goes through. Nothing new positions anything.
+   *
+   * The map is what `anchorFor` reads later, so the entity the line lands on
+   * and the entity that was pulled outward are the same one by construction.
+   */
+  const insightAnchors = new Map<string, string>()
+  const anchorKey = (insightId: string, regionId: string) => `${insightId}~${regionId}`
+  for (const link of links) {
+    const s = linkEndId(link.source)
+    const t = linkEndId(link.target)
+    if (!s || !t) continue
+    for (const [regionId, farId] of [[s, t], [t, s]] as const) {
+      const proto = protoById.get(regionId)
+      if (!proto || proto.shown.length === 0) continue
+      if (nodeById.get(farId)?.kind !== 'insight') continue
+      const key = anchorKey(farId, regionId)
+      if (insightAnchors.has(key)) continue
+      const pick = hashId(key) % proto.shown.length
+      const anchorId = proto.shown[pick].id
+      insightAnchors.set(key, anchorId)
+      // Face the insight's own position — the direction the line will leave in.
+      addTarget(anchorId, farId, positionOf(farId))
+    }
+  }
+
   // Preferred angle per entity + a tangential slot so entities heading the
-  // same way spread along the arc instead of stacking on one point.
-  const { arcSpread, slotSpacing, angleJitter } = EXPANDED_CLUSTER.entity.externalBias
+  // same way spread along the arc instead of stacking on one point — through
+  // the SHARED bias builder (deriveExternalBiases), which the Structured focus
+  // layer also uses for its expanded regions.
   const biasByEntity = new Map<string, ExternalBias>()
   for (const proto of protoRegions) {
     const anchor = centerOf(proto.cluster.id)
-    const directed = proto.shown
-      .filter(node => externalTargets.has(node.id))
-      .map(node => {
-        const targets = externalTargets.get(node.id)!
-        // Several partners → the average direction (their barycentre).
-        const mx = targets.reduce((sum, t) => sum + t.x, 0) / targets.length
-        const my = targets.reduce((sum, t) => sum + t.y, 0) / targets.length
-        return { id: node.id, angle: Math.atan2(my - anchor.y, mx - anchor.x) }
-      })
-      // Deterministic order: by angle, ties broken by id.
-      .sort((a, b) => a.angle - b.angle || (a.id < b.id ? -1 : 1))
-
-    // Bucket co-directional entities, then fan each bucket symmetrically
-    // around its shared angle.
-    const buckets = new Map<number, typeof directed>()
-    for (const entry of directed) {
-      const key = Math.round(entry.angle / (slotSpacing * 2))
-      if (!buckets.has(key)) buckets.set(key, [])
-      buckets.get(key)!.push(entry)
-    }
-    for (const bucket of buckets.values()) {
-      const half = (bucket.length - 1) / 2
-      /**
-       * Angular variation as a fan EXPANSION, never a rotation: the bucket's
-       * slot spacing is widened by an id-seeded factor, so the group is not a
-       * stamped arc, while every intra-bucket gap can only grow.
-       *
-       * ⚠️ Rotating instead (per entity OR per bucket) regressed spacing:
-       * a lone entity's rotation can walk it into a neighbouring bucket's
-       * entity — the model buckets on PROVISIONAL angles while the renderer
-       * re-resolves the live ones each frame, so no rotation computed here can
-       * be proven safe. Two entities collapsed to a 2.2px gap that way
-       * (measured), against a 6.9px baseline. An expansion cannot do that.
-       */
-      const spread = slotSpacing * (1 + hashFraction(bucket[0].id, 'angle') * angleJitter)
-      bucket.forEach((entry, index) => {
-        const offset = (index - half) * spread
-        biasByEntity.set(entry.id, {
-          angle: entry.angle,
-          // Never seed outside the arc the projection would clamp to anyway.
-          slotOffset: Math.max(-arcSpread, Math.min(arcSpread, offset)),
-          radiusFraction: hashFraction(entry.id, 'radius'),
-          targetIds: externalTargetIds.get(entry.id) ?? [],
-        })
-      })
-    }
+    const perRegion = deriveExternalBiases(
+      proto.shown
+        .filter(node => externalTargets.has(node.id))
+        .map(node => ({
+          id: node.id,
+          targets: externalTargets.get(node.id)!,
+          targetIds: externalTargetIds.get(node.id) ?? [],
+        })),
+      anchor,
+    )
+    for (const [id, bias] of perRegion) biasByEntity.set(id, bias)
   }
 
   // Pass 2 — the packing that ships, with the annulus constraint applied.
@@ -1097,13 +1166,20 @@ export function deriveDrilldown(
      * the region's entities by an id-hash of the (insight, cluster) pair —
      * stable per reload and per re-expansion, never the whole circle.
      */
-    const anchorFor = (regionId: string, farId: string): string | undefined => {
-      const region = regionById.get(regionId)
-      if (!region || region.entities.length === 0) return undefined
-      if (nodeById.get(farId)?.kind !== 'insight') return undefined
-      const pick = hashId(`${farId}~${regionId}`) % region.entities.length
-      return region.entities[pick].node.id
-    }
+    /*
+     * The anchor is the entity the bias pass already pulled to the perimeter
+     * FACING this insight — by construction the closest point in the region to
+     * the target, so the line leaves from the nearest edge instead of cutting
+     * across the interior.
+     *
+     * ⚠️ A scored re-pick (shortest line + penalties for grazing the chip or
+     * other dots) was tried here and measured WORSE: it kept selecting
+     * interior entities whose lines then crossed more dots than the perimeter
+     * one did (unrelated-node crossings 6 → 16, chip 2 → 4). The bias pass
+     * already solves the placement problem; a second selection just undoes it.
+     */
+    const anchorFor = (regionId: string, farId: string): string | undefined =>
+      insightAnchors.get(anchorKey(farId, regionId))
 
     routedLinks.push({
       key,

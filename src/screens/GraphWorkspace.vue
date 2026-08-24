@@ -43,6 +43,7 @@ import RequestCard from '@/components/RequestCard.vue'
 import ProcessingRow from '@/components/ProcessingRow.vue'
 import AssistantThoughtToggle from '@/components/AssistantThoughtToggle.vue'
 import AssistantAccordion from '@/components/AssistantAccordion.vue'
+import AnswerProse from '@/components/AnswerProse.vue'
 import AssistantAnswer from '@/components/AssistantAnswer.vue'
 import AssistantRailToggle from '@/components/AssistantRailToggle.vue'
 import AppTabSegments from '@/components/AppTabSegments.vue'
@@ -672,6 +673,16 @@ function resetGraphView() {
 const viewportChanged = ref(false)
 
 /**
+ * Structured cluster-detail is open. It is the SECOND reason the Reset control
+ * shows: opening a cluster deliberately leaves the camera untouched (the wheel
+ * turns instead), so `viewportChanged` stays false and Reset would otherwise
+ * be unavailable exactly when there is something to reset. One control, two
+ * inputs — resetView() already closes the detail, unwinds the wheel and
+ * restores the framing in one call.
+ */
+const structuredDetailOpen = ref(false)
+
+/**
  * Where inside an hour slot each insight dot sits, as 0–1 fractions.
  *
  * Prefers the dataset's own `insightOffsets` (real moments within the hour);
@@ -831,9 +842,31 @@ function scrollChatToLatest() {
   })
 }
 
+/**
+ * Bring the LATEST REQUEST to the top of the rail instead of the bottom of the
+ * conversation. Used for the turn that switches the rail from the summary view
+ * into the chat view (the suggestion → send flow): the reader should land on
+ * the question they just asked — request, then thinking, then the answer
+ * unrolling below — not on the answer's action row with everything above it
+ * off-screen.
+ */
+function scrollChatToRequest() {
+  nextTick(() => {
+    const stack = railStack.value
+    if (!stack) return
+    const requests = stack.querySelectorAll<HTMLElement>('.chat__request')
+    const latest = requests[requests.length - 1]
+    if (latest) stack.scrollTo({ top: latest.offsetTop - stack.offsetTop, behavior: 'smooth' })
+  })
+}
+
 function send() {
   const question = draft.value.trim()
   if (!question) return
+  // The FIRST message is the summary → chat transition; it gets the read-from-
+  // the-top treatment. Later turns keep the usual follow-the-conversation
+  // scroll. Captured before the push so the answer callback below sees it too.
+  const isOpeningTurn = chatMessages.value.length === 0
   chatMessages.value.push(question)
   draft.value = ''
   // The panel has done its job — back to its collapsed default, with the
@@ -843,7 +876,8 @@ function send() {
   nextTick(measureComposer)
   // Simulated thinking. Cleared on unmount so a pending timer can never write
   // to a torn-down component.
-  scrollChatToLatest()
+  if (isOpeningTurn) scrollChatToRequest()
+  else scrollChatToLatest()
   chatProcessing.value = true
   if (processingTimer) clearTimeout(processingTimer)
   processingTimer = setTimeout(() => {
@@ -851,7 +885,11 @@ function send() {
     // The processing row is replaced by the thought toggle + the answer.
     chatAnswered.value = true
     processingTimer = null
-    scrollChatToLatest()
+    // On the opening turn the viewport stays at the top of the conversation —
+    // forcing it down to the freshly-landed answer would yank the reader away
+    // from the request they are looking at. Normal scrolling (and the
+    // follow-the-latest behaviour of later turns) is untouched.
+    if (!isOpeningTurn) scrollChatToLatest()
   }, PROCESSING_MS)
 }
 
@@ -900,6 +938,7 @@ onBeforeUnmount(() => {
           @cluster-expand="handleClusterExpand"
           @expand-limit="handleExpandLimit"
           @viewport-change="viewportChanged = !$event"
+          @focus-change="structuredDetailOpen = $event"
         />
         <!-- The canvas summary in text, for keyboard and screen-reader users. -->
         <p class="d-sr-only">{{ graphSummary }}</p>
@@ -949,7 +988,7 @@ onBeforeUnmount(() => {
             once the camera has moved away from the initial fit-to-view.
             Icon-only, so the action name lives in the aria-label.
           -->
-          <AppButton v-if="viewportChanged" variant="secondary" size="m" icon-only aria-label="Reset view" @click="resetGraphView">
+          <AppButton v-if="viewportChanged || structuredDetailOpen" variant="secondary" size="m" icon-only aria-label="Reset view" @click="resetGraphView">
             <template #icon><v-icon icon="refresh" /></template>
           </AppButton>
           <AppButton variant="secondary" size="m" icon-only aria-label="Search the graph" @click="notify('Graph search opened')">
@@ -1299,7 +1338,7 @@ onBeforeUnmount(() => {
           </AppButton>
         </header>
 
-        <div ref="railStack" class="rail__stack px-6 pb-6 pt-0 d-flex flex-column ga-4">
+        <div ref="railStack" class="rail__stack px-6 pb-13 pt-0 d-flex flex-column ga-4">
           <!--
             DASHBOARD STATE — what the rail shows before a conversation starts.
             Swapped wholesale for the chat below; the header above and the
@@ -1312,39 +1351,48 @@ onBeforeUnmount(() => {
               connected sources, insight potential, meters) are removed from this
               default view for now — the chat state below is untouched.
             -->
-            <section>
-              <!--
-                A `div`, not an `h2`: this is a section label, and the heading
-                element brought a user-agent margin and a heading line box with
-                it. The spacing below is owned here (12px), not by a parent gap,
-                so the pair reads as one block.
-              -->
-              <div class="rail-summary__title text-title-medium font-weight-medium">
-                {{ data.railSummary.title }}
-              </div>
-              <p class="rail-summary__body text-body-medium">{{ data.railSummary.body }}</p>
-            </section>
-
             <!--
-              The counts as a compact LIST, built like the suggestions list it
-              sits above: one row per figure, full width, the same padding,
-              radius and hover treatment, and a chevron that only appears under
-              the pointer. Real <button>s — each row is a way into that part of
-              the graph, so it needs keyboard reach and a focus ring.
+              BOTTOM-WEIGHTED: `margin-top: auto` inside the flex column pushes
+              the whole dashboard block down, so the flexible empty space falls
+              between the header and this content rather than under it. The
+              stack's own bottom padding keeps it clear of the composer.
             -->
-            <ul class="rail-kpis">
-              <li v-for="kpi in railKpis" :key="kpi.id">
-                <button type="button" class="rail-kpi" @click="notify(`${kpi.label}: ${kpi.value}`)">
-                  <v-icon class="rail-kpi__icon" :icon="kpi.icon" size="20" />
-                  <span class="rail-kpi__value text-title-medium font-weight-medium tabular">
-                    {{ kpi.value }}
-                  </span>
-                  <span class="rail-kpi__label text-body-small">{{ kpi.label }}</span>
-                  <!-- Always in the layout; revealed by opacity so the row never shifts. -->
-                  <v-icon class="rail-kpi__chevron" icon="chevronRight" size="16" />
-                </button>
-              </li>
-            </ul>
+            <div class="rail-dashboard">
+              <!-- No section label any more: the paragraph IS the summary.
+                   Rendered through AnswerProse, so names of real graph items
+                   are the same interactive references the answer prose uses —
+                   same dotted underline, same hover isolation on the canvas
+                   (answerHighlightId), same click-to-focus (onAnswerRef). -->
+              <p class="rail-summary__body text-body-medium">
+                <AnswerProse
+                  :runs="data.railSummary.body"
+                  @ref-click="onAnswerRef"
+                  @ref-hover="answerHighlightId = $event"
+                />
+              </p>
+
+              <!--
+                The counts as compact CHIPS — value + label in one hug-content
+                pill, three to a row while the rail is wide enough and wrapping
+                when it is not. Still real <button>s, so each figure keeps the
+                keyboard reach and focus ring the list rows had.
+              -->
+              <ul class="rail-kpis">
+                <li v-for="kpi in railKpis" :key="kpi.id">
+                  <button
+                    type="button"
+                    class="rail-kpi-chip"
+                    @click="notify(`${kpi.label}: ${kpi.value}`)"
+                  >
+                    <v-icon class="rail-kpi-chip__icon" :icon="kpi.icon" size="16" />
+                    <span class="rail-kpi-chip__value text-body-medium font-weight-medium tabular">
+                      {{ kpi.value }}
+                    </span>
+                    <span class="rail-kpi-chip__label text-label-small">{{ kpi.label }}</span>
+                  </button>
+                </li>
+              </ul>
+            </div>
           </template>
 
           <!--
@@ -1384,7 +1432,6 @@ onBeforeUnmount(() => {
                       v-model="reasoningOpen[step.id]"
                       :title="step.title"
                       :items="step.items"
-                      :children="step.children"
                     />
                   </div>
                 </AssistantThoughtToggle>
@@ -2213,89 +2260,81 @@ onBeforeUnmount(() => {
 }
 
 /* ── THE RAIL AT REST ─────────────────────────────────────────────────── */
-.rail-summary__title {
-  color: rgba(var(--v-theme-button-white-100));
-  /*
-   * 20px per the rail design — deliberately between the MD3 steps
-   * (title-medium 16 / title-large 22), so the size is set here while the
-   * class keeps supplying family, weight and tracking.
-   */
-  font-size: 20px;
-  /* The box is the type, nothing more: no heading margin, and a line box the
-     height of the glyphs rather than the type scale's leading. */
-  margin: 0 0 12px;
-  line-height: 1;
-}
-
 .rail-summary__body {
   color: rgba(var(--v-theme-button-white-80));
   margin: 0;
+}
+
+/*
+ * ── THE DASHBOARD BLOCK, BOTTOM-WEIGHTED ──────────────────────────────────
+ * `margin-top: auto` in the stack's flex column drives the whole composition:
+ * the header stays at the top, the slack collects in the middle, and the
+ * summary + counts settle just above the composer. The stack's own `pb-6`
+ * keeps a comfortable gap so the content never touches it.
+ */
+.rail-dashboard {
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  /* Summary → counts: one step tighter than the stack's own rhythm, so the
+     pair reads as one block rather than two sections. */
+  gap: 12px;
 }
 
 .rail-kpis {
   list-style: none;
   padding: 0;
   margin: 0;
-  width: 100%;
+  display: flex;
+  /* Three to a row while the rail is wide enough; wraps rather than squeezing
+     when it is not (narrow rail, or a longer count). */
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 /*
- * One row per figure — the suggestions row's geometry and states, so the two
- * lists read as the same control in the same rail.
+ * The count chip: the same pill treatment SourceChip uses — `gray2` hairline
+ * on a `gray4` ground — so the rail's chips and the assistant's chips read as
+ * one family. Hug-content by construction (inline-flex, no width), and a real
+ * <button>, which is why it carries a focus ring.
  */
-.rail-kpi {
-  display: flex;
+.rail-kpi-chip {
+  display: inline-flex;
   align-items: center;
-  gap: 10px;
-  width: 100%;
-  padding: 8px 12px;
-  border: none;
-  border-radius: var(--radius-md);
-  background: transparent;
-  text-align: left;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: var(--radius-full);
+  border: 1px solid rgb(var(--v-theme-gray2));
+  background: rgb(var(--v-theme-gray4));
   cursor: pointer;
-  transition: color 0.15s ease, background-color 0.15s ease;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
 }
 
-.rail-kpi:hover,
-.rail-kpi:focus-visible {
-  background: rgba(var(--v-theme-button-outlined-accent-1), 0.10);
+.rail-kpi-chip:hover,
+.rail-kpi-chip:focus-visible {
+  border-color: rgba(var(--v-theme-button-gray-w-40));
+  background: rgba(var(--v-theme-button-gray-w-10));
 }
 
-.rail-kpi:focus-visible {
+.rail-kpi-chip:focus-visible {
   outline: 2px solid rgba(var(--v-theme-button-white-100), 0.3);
-  outline-offset: -2px;
+  outline-offset: 2px;
 }
 
-/* The KPI marks carry the brand: the theme's primary token. */
-.rail-kpi__icon {
+/* The KPI mark, leading the chip — the SAME icon the cards carried (the key
+   still comes from the dataset), just at chip scale. `align-items: center` on
+   the chip centres it against the type. */
+.rail-kpi-chip__icon {
   color: rgb(var(--v-theme-primary));
   flex-shrink: 0;
 }
-.rail-kpi__value { color: rgba(var(--v-theme-button-white-100)); }
-/* Takes the slack, so the chevron keeps the right edge whatever the label. */
-.rail-kpi__label {
-  color: rgba(var(--v-theme-button-white-60));
-  flex: 1 1 auto;
-  min-width: 0;
-}
 
-/* Reserved in the layout, revealed on hover — the row never shifts. */
-.rail-kpi__chevron {
-  flex-shrink: 0;
-  color: rgb(var(--v-theme-button-outlined-accent-1));
-  opacity: 0;
-  transition: opacity 0.15s ease;
-}
-
-.rail-kpi:hover .rail-kpi__chevron,
-.rail-kpi:focus-visible .rail-kpi__chevron {
-  opacity: 1;
-}
+/* The figure leads; the label is its caption. */
+.rail-kpi-chip__value { color: rgba(var(--v-theme-button-white-100)); }
+.rail-kpi-chip__label { color: rgba(var(--v-theme-button-white-60)); }
 
 @media (prefers-reduced-motion: reduce) {
-  .rail-kpi,
-  .rail-kpi__chevron { transition: none; }
+  .rail-kpi-chip { transition: none; }
 }
 
 /* A sent message hugs the right of the chat column, per the reference. */

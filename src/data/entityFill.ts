@@ -17,6 +17,15 @@
  *   people, invented topics, invented documents. Never real correspondence.
  * - Deterministic: id-seeded hashes decide counts and names — the same graph
  *   on every reload and on every mode switch. Math.random() is banned here.
+ * - ⚠️ ENTITY DISPLAY NAMES MUST BE SEMANTIC, NEVER RAW FILENAMES OR DOCUMENT
+ *   FILENAMES. A pool entry names the CONCEPT an entity stands for — "Brand
+ *   Assets", "Renewal Terms", "Contract Review" — never the artifact it
+ *   arrived as ("Logo_Pack.zip", "Renewal_Quote.pdf"). No file extensions, no
+ *   `Underscore_Case` document titles. Two reasons: a filename is ingested
+ *   third-party material the graph should not surface as its own vocabulary,
+ *   and the entity is the idea, not the attachment. Documents remain
+ *   first-class elsewhere — document HUBS and provenance chips still carry
+ *   real document names; this rule governs ENTITY labels only.
  */
 
 /** Stable non-negative hash of a string (same recipe the dataset uses). */
@@ -137,10 +146,13 @@ const NAME_POOLS: Record<string, readonly string[]> = {
     'Status page', 'API reference', 'Security whitepaper', 'Roadmap board',
     'Community forum', 'Help center',
   ],
+  // SEMANTIC, never filenames — see the naming rule in this file's header.
+  // These name what the attachment IS ("Brand Assets"), not the artifact it
+  // happened to arrive as ("Logo_Pack.zip").
   Attachments: [
-    'Pitch_Deck_v7.pdf', 'Financial_Model.xlsx', 'Atlas_Spec.docx', 'Logo_Pack.zip',
-    'Contract_Redline.pdf', 'Onboarding_Guide.pdf', 'Metrics_Export.csv',
-    'Board_Minutes.docx', 'Screenshot_Flow.png', 'Renewal_Quote.pdf',
+    'Pitch Materials', 'Financial Model', 'Product Spec', 'Brand Assets',
+    'Contract Review', 'Onboarding', 'Usage Metrics',
+    'Board Notes', 'Flow Walkthrough', 'Renewal Terms',
   ],
   Workflows: [
     'Lead triage', 'Digest generation', 'Contract review', 'Meeting recap',
@@ -155,6 +167,21 @@ const DEFAULT_POOL: readonly string[] = [
 ]
 
 /**
+ * The name pool for a cluster category.
+ *
+ * ⚠️ QUALIFIED CATEGORIES. A source with more clusters than there are
+ * categories qualifies the repeats — "People 2", "People 3" (see the uniqueness
+ * rule in graphWorkspace.ts). Those still name the same KIND of thing, so the
+ * trailing numeral is stripped before the lookup; otherwise every qualified
+ * cluster would silently fall back to the generic pool and fill with
+ * "Signal A / Thread review" instead of people's names.
+ */
+function poolFor(category: string | null): readonly string[] {
+  if (!category) return DEFAULT_POOL
+  return NAME_POOLS[category] ?? NAME_POOLS[category.replace(/ \d+$/, '')] ?? DEFAULT_POOL
+}
+
+/**
  * The CANONICAL label of a cluster's i-th entity: an id-seeded stride walk
  * over the cluster's category pool, so names within one cluster are mostly
  * distinct; pools smaller than the population suffix a numeral rather than
@@ -162,7 +189,7 @@ const DEFAULT_POOL: readonly string[] = [
  * so every renderer shows the same name by reading `node.label`.
  */
 export function entityLabelFor(clusterId: string, index: number, category: string | null): string {
-  const pool = (category && NAME_POOLS[category]) || DEFAULT_POOL
+  const pool = poolFor(category)
   const seed = hashId(clusterId)
   // Stride co-prime-ish with the pool length spreads picks across the pool.
   const stride = 1 + (seed % (pool.length - 1))
@@ -178,6 +205,6 @@ export function entityLabelFor(clusterId: string, index: number, category: strin
  * changes between renders or reloads. Display-only.
  */
 export function syntheticNameFor(entityId: string, category: string | null): string {
-  const pool = (category && NAME_POOLS[category]) || DEFAULT_POOL
+  const pool = poolFor(category)
   return pool[hashId(entityId) % pool.length]
 }

@@ -31,7 +31,7 @@ import GmailGlyph from '@/assets/nodeSourceIcons/Gmail.svg?raw'
 import GoogleDriveGlyph from '@/assets/nodeSourceIcons/Google drive.svg?raw'
 import WhatsAppGlyph from '@/assets/nodeSourceIcons/Whatsapp.svg?raw'
 import SpotifyGlyph from '@/assets/nodeSourceIcons/Spotify.svg?raw'
-import DocumentLogoRaw from '@/assets/nodeSourceIcons/Document Logo.svg?raw'
+import DocumentIconRaw from '@/assets/nodeSourceIcons/Document icon.svg?raw'
 import LinkedInLogo from '@/assets/nodeSourceIcons/Linkedin Logo.svg'
 import SpotifyLogo from '@/assets/nodeSourceIcons/Spotify Logo.svg'
 import WhatsAppLogo from '@/assets/nodeSourceIcons/Whatsapp Logo.svg'
@@ -53,29 +53,6 @@ const SOURCE_BRAND_TILES: Record<string, string> = {
   Spotify: SpotifyLogo,
   WhatsApp: WhatsAppLogo,
 }
-
-/**
- * ── DOCUMENT-NODE INK: DS SEMANTIC TOKENS, RESOLVED LIVE ────────────────
- * The asset's own extension palette (documentIcon.ts) is tuned for the WHITE
- * chip tile; on the node's `surface-light` ground those inks are too dark to
- * read. Node tiles therefore use the theme's bright SEMANTIC colors instead
- * — error for pdf, success for spreadsheets, info for docs, warning for
- * decks, gray1 for plain text — resolved from the live theme like the
- * surface (literals below are pre-mount fallback mirrors of the dark theme).
- * The white assistant-chip tile keeps the original palette untouched.
- */
-const DOCUMENT_NODE_INKS: Record<string, { token: string, fallback: string }> = {
-  pdf: { token: '--v-theme-error', fallback: '#FB4C75' },
-  xlsx: { token: '--v-theme-success', fallback: '#34EDAA' },
-  csv: { token: '--v-theme-success', fallback: '#34EDAA' },
-  docx: { token: '--v-theme-info', fallback: '#57B6F8' },
-  pptx: { token: '--v-theme-warning', fallback: '#F2C585' },
-  txt: { token: '--v-theme-gray1', fallback: '#949B99' },
-  md: { token: '--v-theme-gray1', fallback: '#949B99' },
-}
-
-/** Unknown/absent extension → the generic bright document ink (info). */
-const DOCUMENT_NODE_DEFAULT_INK = { token: '--v-theme-info', fallback: '#57B6F8' }
 
 /** Pre-mount fallback: the dark theme's `surface-bright`, mirrored. */
 const SURFACE_FALLBACK = '#0C1311'
@@ -100,20 +77,6 @@ function themeColor(token: string, fallback: string): string {
     if (triplet) return `rgb(${triplet})`
   }
   return fallback
-}
-
-/** `".PDF"`, `"report.final.pdf"` → `"pdf"`. */
-function normalizeExtension(value: string): string {
-  const bare = value.trim().toLowerCase()
-  const lastDot = bare.lastIndexOf('.')
-  return lastDot >= 0 ? bare.slice(lastDot + 1) : bare
-}
-
-/** The bright node ink for an extension, from the live theme. */
-function documentNodeInk(extension?: string | null): string {
-  const entry = (extension && DOCUMENT_NODE_INKS[normalizeExtension(extension)])
-    || DOCUMENT_NODE_DEFAULT_INK
-  return themeColor(entry.token, entry.fallback)
 }
 
 /**
@@ -166,24 +129,80 @@ export function getSourceNodeIcon(sourceId: string): string | null {
 }
 
 /**
- * Graph DOCUMENT-node tile, shared by Structured AND Unstructured: the
- * `Document Logo.svg` asset with
- * - its white background rect re-toned to the shared theme surface, and
- * - its file glyph recoloured per extension in the theme's BRIGHT semantic
- *   inks (DOCUMENT_NODE_INKS above) so the mark reads clearly on the dark
- *   node surface.
- * Only the inner file-type mark changes colour; the surface stays the token.
+ * ── THE DOCUMENT-NODE ARTWORK ────────────────────────────────────────────
+ * `Document icon.svg` is the designed document mark: a 100×100 artboard whose
+ * glyph is drawn on a TRANSPARENT ground (unlike the brand tiles and the old
+ * `Document Logo.svg`, which are full-bleed faces). Two consequences, both
+ * handled by `documentTile` below:
+ *
+ * 1. it needs the same theme-surface backing rect every other composed tile
+ *    gets, so the node keeps its background instead of showing the canvas;
+ * 2. it must be SCALED TO FIT — the node paints its tile as a square <image>
+ *    clipped to a circle, and the asset's glyph reaches 87% of the artboard
+ *    height, so at 1:1 the page's corners would fall outside that circle and
+ *    be cut. Fitting it to the inscribed circle is what keeps the mark whole.
+ *
+ * The fit is expressed once here and the tile is emitted at the same 100×100
+ * box every other tile uses, so Structured and Unstructured — which size the
+ * <image> from their own node diameters — scale it identically.
  */
-export function documentNodeIconFor(extension?: string | null): string {
-  const color = documentNodeInk(extension)
+
+/** The asset's artboard, and the tight bounding box of its glyph within it. */
+const DOCUMENT_ARTBOARD = 100
+const DOCUMENT_GLYPH_BOX = { x: 18.13, y: 6, width: 63.74, height: 87 }
+
+/**
+ * The glyph's longest side as a fraction of the tile. 0.68 is what keeps the
+ * whole mark — including the folded corner — inside the circle the node clips
+ * to, with the breathing room the brand tiles have.
+ */
+const DOCUMENT_GLYPH_FIT = 0.68
+
+/** The asset's inner markup: everything between its own <svg> tags. */
+const DOCUMENT_GLYPH_BODY = DocumentIconRaw
+  .replace(/^[\s\S]*?<svg[^>]*>/, '')
+  .replace(/<\/svg>\s*$/, '')
+  .trim()
+
+/**
+ * Compose the document tile: surface rect, then the glyph scaled about its own
+ * bounding-box centre and translated onto the tile's centre. Scaling about the
+ * box (not the artboard) is what actually CENTRES the mark — the asset's glyph
+ * is not symmetric within its artboard — and one uniform `scale()` is what
+ * preserves its aspect ratio.
+ */
+function documentTile(surface: string): string {
+  const scale = (DOCUMENT_ARTBOARD * DOCUMENT_GLYPH_FIT) / DOCUMENT_GLYPH_BOX.height
+  const cx = DOCUMENT_GLYPH_BOX.x + DOCUMENT_GLYPH_BOX.width / 2
+  const cy = DOCUMENT_GLYPH_BOX.y + DOCUMENT_GLYPH_BOX.height / 2
+  const tx = DOCUMENT_ARTBOARD / 2 - cx * scale
+  const ty = DOCUMENT_ARTBOARD / 2 - cy * scale
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${DOCUMENT_ARTBOARD}" `
+    + `height="${DOCUMENT_ARTBOARD}" viewBox="0 0 ${DOCUMENT_ARTBOARD} ${DOCUMENT_ARTBOARD}" fill="none">`
+    + `<rect width="${DOCUMENT_ARTBOARD}" height="${DOCUMENT_ARTBOARD}" fill="${surface}"/>`
+    + `<g transform="translate(${tx.toFixed(3)} ${ty.toFixed(3)}) scale(${scale.toFixed(5)})">`
+    + `${DOCUMENT_GLYPH_BODY}</g></svg>`
+  return `data:image/svg+xml,${encodeURIComponent(svg)}`
+}
+
+/**
+ * Graph DOCUMENT-node tile, shared by Structured AND Unstructured: the
+ * `Document icon.svg` mark, centred at a fixed fit on the shared theme
+ * surface. ONE builder for both modes, so they cannot drift apart.
+ *
+ * ⚠️ `extension` is still accepted so every call site is unchanged, but the
+ * new asset ships its OWN blue gradient palette (three gradients plus the
+ * page rules), which is the designed mark — so the per-extension ink recolour
+ * the previous flat-glyph asset supported no longer applies to graph nodes.
+ * The white assistant/chip tile (src/data/documentIcon.ts) keeps its own
+ * per-extension palette untouched.
+ */
+export function documentNodeIconFor(_extension?: string | null): string {
   const surface = nodeSurfaceColor()
-  const key = `${surface}|doc|${color}`
+  const key = `${surface}|doc-icon`
   const cached = tileCache.get(key)
   if (cached) return cached
-  const svg = DocumentLogoRaw
-    .replace(/fill="white"/gi, `fill="${surface}"`)
-    .replace(/#155EEF/gi, color)
-  const uri = `data:image/svg+xml,${encodeURIComponent(svg)}`
+  const uri = documentTile(surface)
   tileCache.set(key, uri)
   return uri
 }

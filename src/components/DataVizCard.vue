@@ -49,8 +49,10 @@
       <div class="text-title-medium font-weight-medium flex-grow-1">{{ title }}</div>
 
       <slot name="actions">
+        <!-- Ghost on purpose: the menu is an affordance, not an action the
+             header advertises — no resting surface, hover/focus only. -->
         <AppButton
-          variant="secondary"
+          variant="ghost"
           size="s"
           icon-only
           :aria-label="`Options for ${title}`"

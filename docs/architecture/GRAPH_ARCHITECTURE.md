@@ -73,6 +73,93 @@ addEdge(source: string, target: string)
 
 ---
 
+## Data rules (synthetic dataset)
+
+These hold for the generated graph in `src/data/graphWorkspace.ts`. They are
+product rules, not implementation details — a renderer may rely on them.
+
+### Clusters belonging to the same Source must never share the same display name
+
+Within one Source, every Cluster carries a distinct `category`. A source that
+showed `Decisions` five times read as five copies of one thing rather than five
+distinct clusters, which is exactly the confusion a knowledge graph must not
+create.
+
+How it is satisfied (`graphWorkspace.ts`, the cluster ring builder):
+
+- the cluster id's hash picks a **preferred** category from `SEMANTIC_CATEGORIES`;
+- the assignment then walks the list from there to the first name **this source**
+  has not used yet;
+- if a source has more clusters than there are categories, the preferred name is
+  qualified — `People 2`, `People 3`. The base word stays first, and
+  `entityFill.ts` strips the qualifier when choosing a name pool, so a qualified
+  cluster still fills with the right kind of entity names.
+
+Sources are independent: two different sources may each have a `Decisions`, which
+is correct — the rule is about siblings.
+
+Deterministic by construction: the hash seeds it and the walk is ordered, so the
+same ids produce the same names on every reload. `Math.random()` is banned in
+graph data and layout.
+
+### Every group participates in the cross-group Cluster network
+
+Each Source/Document group (a hub plus its surrounding clusters) carries at
+least one **Cluster ↔ Cluster** relationship to a cluster of another group, so
+the Unstructured graph reads as one loose connected network instead of isolated
+islands. Never Source↔Source, and never two clusters of the same group.
+
+Generated deterministically in `graphWorkspace.ts`
+(`CROSS_GROUP_CLUSTER_LINKS`): a minimum spanning tree over hub seed positions
+routes the pairing (Kruskal, nearest hub pairs first): an edge is taken only
+when it has a CLEAN cluster pair, and a blocked pair is skipped so connectivity
+reroutes through the next-nearest groups.
+
+**The layout rule: no connector may cut through a cluster group.** A candidate
+segment is rejected while a clean alternative exists if it enters the occupied
+BUBBLE of any group it does not terminate in, passes within clearance of any
+node (source/document/cluster/insight), or crosses an already-accepted
+cross-group segment — and it may only start from a FACING cluster (the side of
+its group toward the partner), so a line never crosses its own group. Candidate
+priority: bubble hits → node obstructions → crossings → length → id order.
+`CROSS_LINK_PINS` holds design-reviewed endpoint overrides for cases the force
+simulation settles badly despite clean seed geometry (currently: the
+Legalfab↔Google Drive bridge lands on Projects, not Decisions).
+
+In the force layer these direct bridges are their own link class (`bridge`,
+useD3Force.linkClass) with a long soft leash (`clusterBridgeDistance/Strength`)
+— crossGroup's tighter pull is tuned for insight-mediated links and dragged
+whole groups onto each other when applied to a direct cluster↔cluster edge. They are real
+dataset links — the force layer classifies them `crossGroup`, and hover,
+endpoints and timeline treat them like any other relationship.
+
+### Structured and Unstructured must expose the same Entity set per Cluster
+
+For the same `clusterId`, both modes must show EXACTLY the dataset's entities:
+
+```
+StructuredEntityIds(clusterId) === UnstructuredEntityIds(clusterId)
+```
+
+Compared by entity **id** (never by label): the count, the ids and the labels
+must all match. `graphWorkspace.ts` nodes/links are the single source of truth —
+no renderer may generate, duplicate or top up entities.
+
+How each side satisfies it:
+
+- **Unstructured** reads the dataset nodes directly (the drill-down's entity
+  population moved into the dataset — see `expandedTokens.ts`, `demo` note);
+- **Structured** derives membership from the resolved-connection set
+  (`structuredConnections.ts`): a cluster's members are the raw-entity ends of
+  its self-links, normalized through `representativeId`. Those self-links are
+  themselves generated from the dataset, which is what keeps the two derivations
+  equal.
+
+Enforced in DEV: `deriveStructuredFocus` compares its derived set against the
+dataset on every drill-down open and `console.warn`s on any missing, extra, or
+relabelled entity. If it fires, fix the derivation or the resolved connections —
+never the dataset, and never by padding a renderer.
+
 ## Layer 2: State Layer (Pinia)
 
 **Location:** `src/stores/graph.ts`

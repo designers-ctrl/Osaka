@@ -80,10 +80,28 @@ export const CLUSTER_SIZING = {
    * heavier, just never as an insight.
    */
   minDiameter: 14,
-  maxDiameter: 20,
+  /*
+   * 19, not 22: the insight window's floor came down to 20, and the hierarchy
+   * rule is a STRICT inequality — the biggest cluster must stay under the
+   * smallest insight. Lowered rather than raised: clusters are never inflated
+   * to keep the ordering, the ceiling just yields to the kind above it.
+   */
+  maxDiameter: 19,
   // Radii are DERIVED, so the window above is the only place to edit.
   minRadius: 14 / 2,
-  maxRadius: 20 / 2,
+  maxRadius: 19 / 2,
+  /*
+   * THE SIZE DRIVER: how many entities the cluster actually holds. The window
+   * matches the dataset's real spread (entityFill.ts ENTITY_POPULATION —
+   * normal clusters 12–20, dense ones 26–42), so the full diameter range is
+   * exercised instead of everything piling onto one end.
+   *
+   * Scaled on a SQRT curve: entity counts are an area-like quantity, so √
+   * makes a 42-entity cluster read as clearly bigger than a 12-entity one
+   * without the dense tail producing outliers that dwarf the rest.
+   */
+  entityCountMin: 12,
+  entityCountMax: 42,
   // Minimum ON-SCREEN diameter: like SOURCE_NODES.minDiameter, but one step
   // larger, so zooming out never renders a cluster smaller than a source.
   // Deliberately NO maximum screen clamp — that would stop clusters growing as
@@ -115,9 +133,15 @@ export function getClusterRadius(entityCountOrWeight: number, isWeight: boolean 
     return minR + (normalized * (maxR - minR))
   }
 
-  // entityCount: scale linearly
-  // entityCount 1-10 → radius minR-maxR
-  const normalized = Math.max(0, Math.min(10, entityCountOrWeight)) / 10
+  /*
+   * entityCount — THE cluster size driver. Normalised across the dataset's
+   * real population window on a SQRT curve (see CLUSTER_SIZING), so more
+   * entities always means a visibly bigger circle and the dense tail cannot
+   * produce outliers.
+   */
+  const { entityCountMin: lo, entityCountMax: hi } = CLUSTER_SIZING
+  const clamped = Math.max(lo, Math.min(hi, entityCountOrWeight))
+  const normalized = (Math.sqrt(clamped) - Math.sqrt(lo)) / (Math.sqrt(hi) - Math.sqrt(lo))
   return minR + (normalized * (maxR - minR))
 }
 
@@ -140,11 +164,20 @@ export const INSIGHT_SIZING = {
    * single inequality is what makes an insight always readable as the largest
    * kind, whatever its confidence and however many entities a cluster holds.
    */
-  minDiameter: 24, // Minimum size for weak insights — must exceed cluster max
-  maxDiameter: 50, // Maximum size for strong insights
+  minDiameter: 20, // Weakest insight — must still exceed CLUSTER_SIZING.maxDiameter
+  maxDiameter: 24, // Strongest insight; a tight band, so insights read as one kind
+  /*
+   * THE SIZE DRIVER: how many relationships the insight actually carries,
+   * counted from the real connection set (graphWorkspace attaches
+   * `connectionCount` to every insight node). The window is the observed
+   * spread; anything outside it clamps, so one unusually busy insight cannot
+   * flatten the rest of the scale.
+   */
+  connectionMin: 1,
+  connectionMax: 8,
   // Minimum ON-SCREEN diameter — the top step of the per-kind clamp ladder
-  // (source 12 < cluster 14 < insight 24), holding the hierarchy at low zoom.
-  minScreenDiameter: 24,
+  // (source 12 < cluster 14 < insight 20), holding the hierarchy at low zoom.
+  minScreenDiameter: 20,
 
   // Size can be driven by:
   // 1. Explicit `size` property in node data (e.g., 5-14 range)
@@ -799,6 +832,16 @@ export const FORCE_SIMULATION = {
   // charge repulsion and the orbit rings keep neighborhoods separated.
   crossGroupDistance: 90, // vs linkDistance 100
   crossGroupStrength: 0.45, // vs linkStrength 0.3
+  /**
+   * DIRECT cluster↔cluster bridges between two groups (the dataset's
+   * cross-group network links). Deliberately LONGER and SOFTER than crossGroup:
+   * those values are tuned for insight-mediated bridges, and applied to a
+   * direct link between two dense rings they dragged whole groups onto each
+   * other until the line lay across a cluster. The long leash keeps the
+   * network connected while letting groups hold their own ground.
+   */
+  clusterBridgeDistance: 170,
+  clusterBridgeStrength: 0.08,
 
   // Center attraction (pulls all nodes toward center)
   nodeStrength: -250,
@@ -966,6 +1009,15 @@ export const VIEWPORT = {
     // Unstructured mode: padding (in data units) added around the rendered graph
     // bounds when computing the first-load / reset fit-to-view transform
     fitPadding: 60,
+    /**
+     * Unstructured mode: multiplier on the fitted scale for the first-load /
+     * reset view. < 1 backs the camera off so the graph opens with breathing
+     * room around it instead of touching the padded fit exactly — the design
+     * asked for roughly 10–20% more air, hence 0.85. Only the DEFAULT framing:
+     * wheel/drag zoom and pan are untouched, and the view stays centred (the
+     * translate is derived from the same scaled bounds).
+     */
+    initialScaleFactor: 0.85,
   },
 
   /*
@@ -1314,6 +1366,65 @@ export function getSourceNodeRadius(zoomScale: number = 1): number {
  * cluster/insight clamps, zooming out shrank variable-size nodes below the
  * screen-clamped sources and inverted the hierarchy.
  */
+/**
+ * An insight's STRENGTH on a normalised 0–1 scale, from the real number of
+ * relationships it carries (`connectionCount`, counted in graphWorkspace from
+ * the actual link set). Falls back to the dataset's `size` metric only when a
+ * node carries no count — never to a constant.
+ *
+ * THE one normalisation both graph modes use, so a given insight lands at the
+ * same relative strength whether it is drawn in the Unstructured field or on
+ * the Structured ring; each mode then maps that fraction into its OWN
+ * diameter window.
+ */
+export function getInsightStrength(node: Record<string, any>): number {
+  // Preferred: the fraction normalised across the WHOLE insight set by the
+  // dataset (graphWorkspace) — that is what spends the full size range no
+  // matter how narrow the absolute counts are.
+  const precomputed = node?.insightStrength
+  if (typeof precomputed === 'number') return Math.max(0, Math.min(1, precomputed))
+  // Fallback for nodes that carry no precomputed strength: the raw count (or
+  // the dataset's `size` metric) against the token window.
+  const { connectionMin: lo, connectionMax: hi } = INSIGHT_SIZING
+  const raw = node?.connectionCount ?? node?.size ?? lo
+  const clamped = Math.max(lo, Math.min(hi, raw))
+  return hi === lo ? 0 : (clamped - lo) / (hi - lo)
+}
+
+/**
+ * THE insight radius (data units) for the Unstructured field: the strength
+ * above mapped into `INSIGHT_SIZING`'s diameter window. Deterministic, varies
+ * per insight, and clamped to the window — whose minimum is strictly greater
+ * than CLUSTER_SIZING.maxDiameter, which is what keeps the hierarchy true.
+ */
+export function getInsightRadius(node: Record<string, any>): number {
+  const { minDiameter, maxDiameter } = INSIGHT_SIZING
+  return (minDiameter + getInsightStrength(node) * (maxDiameter - minDiameter)) / 2
+}
+
+/**
+ * Hold a kind's MINIMUM on-screen size without flattening its size range.
+ *
+ * ⚠️ The obvious `Math.max(dataRadius, floor)` is wrong here, and was the bug:
+ * at the default fit zoom the floor exceeds EVERY data-driven radius in the
+ * window, so every cluster — and every insight — collapsed to exactly the same
+ * circle. Variation existed in the data and never reached the screen.
+ *
+ * Instead the whole window is SCALED so its smallest member just meets the
+ * floor: ratios between members are preserved, so a 42-entity cluster stays
+ * proportionally bigger than a 12-entity one at every zoom level, while the
+ * smallest still never renders below its minimum screen size.
+ */
+function withScreenFloor(
+  dataRadius: number,
+  windowMinDiameter: number,
+  minScreenDiameter: number,
+  k: number,
+): number {
+  const scale = Math.max(1, (minScreenDiameter / k) / windowMinDiameter)
+  return dataRadius * scale
+}
+
 export function getEffectiveNodeRadius(
   node: { kind?: string, size?: number } & Record<string, any>,
   zoomScale: number = 1,
@@ -1328,18 +1439,24 @@ export function getEffectiveNodeRadius(
     return getSourceNodeRadius(zoomScale)
   }
   if (kind === 'cluster') {
-    const dataRadius = node.weight !== undefined
-      ? getNodeRadiusForType(kind, node.weight, true)
-      : node.entityCount !== undefined
-        ? getNodeRadiusForType(kind, node.entityCount, false)
+    // ENTITY COUNT FIRST. `weight` is an id-hash the dataset also carries;
+    // preferring it made every cluster's size a hash rather than a reading of
+    // what the cluster actually holds, which is the whole point of the mark.
+    const dataRadius = node.entityCount !== undefined
+      ? getNodeRadiusForType(kind, node.entityCount, false)
+      : node.weight !== undefined
+        ? getNodeRadiusForType(kind, node.weight, true)
         : getNodeRadiusForType(kind)
-    return Math.max(dataRadius, (CLUSTER_SIZING.minScreenDiameter / 2) / k)
+    return withScreenFloor(dataRadius, CLUSTER_SIZING.minDiameter, CLUSTER_SIZING.minScreenDiameter, k)
   }
   if (kind === 'insight') {
-    const dataRadius = node.size
-      ? getNodeRadiusForType(kind, node.size)
-      : getNodeRadiusForType(kind)
-    return Math.max(dataRadius, (INSIGHT_SIZING.minScreenDiameter / 2) / k)
+    // ONE helper, real connection data — never a per-kind constant.
+    return withScreenFloor(
+      getInsightRadius(node),
+      INSIGHT_SIZING.minDiameter,
+      INSIGHT_SIZING.minScreenDiameter,
+      k,
+    )
   }
   return getNodeRadiusForType(kind)
 }

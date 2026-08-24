@@ -55,7 +55,9 @@ export function applyEntityCountOrientation(
   durationMs = 0,
 ) {
   const counts = scope.selectAll<SVGTextElement, PositionedNode>('text.entity-count')
-  const upright = (d: PositionedNode) => `rotate(${-rotationDeg}, ${d.x || 0}, ${d.y || 0})`
+  // The count lives at its group's ORIGIN now, so the counter-rotation is
+  // about (0, 0) in that local frame — no per-node centre to pass.
+  const upright = () => `rotate(${-rotationDeg})`
   /*
    * NAMED transition ('orient'), and this matters: the focus also fades these
    * same texts (an expanded cluster hides its count). Two UNNAMED transitions on
@@ -108,24 +110,34 @@ export function renderEntityRing(
   // own it let the scene bleed through — this base (theme Gray-4, the canvas'
   // dark ground tone) makes the composite 100% opaque without changing the
   // perceived color.
-  entityRing
-    .selectAll('circle.entity-node-base')
+  /*
+   * ── ONE COMPONENT PER SUMMARY ────────────────────────────────────────────
+   * The base disc, the glass circle, the inner highlight and the count are a
+   * single mark, so they live in ONE group per cluster, positioned by the
+   * group's transform with every child at the group's local origin.
+   *
+   * That is what makes them inseparable: the count cannot drift off its
+   * circle, and hover/focus/pin move or dim the whole summary as one unit
+   * instead of having to enumerate four selectors (and forgetting one — the
+   * count used to be left behind on the ring when a cluster was pinned).
+   */
+  const summaries = entityRing
+    .selectAll<SVGGElement, PositionedNode>('g.entity-summary-group')
     .data(clusterNodes)
-    .join('circle')
+    .join('g')
+    .attr('class', 'entity-summary-group')
+    .attr('transform', d => `translate(${d.x || 0}, ${d.y || 0})`)
+
+  summaries
+    .append('circle')
     .attr('class', 'entity-node-base')
-    .attr('cx', (d) => d.x || 0)
-    .attr('cy', (d) => d.y || 0)
     .attr('r', nodeRadius)
     .attr('fill', 'rgb(var(--v-theme-gray4, 12, 19, 17))')
     .style('pointer-events', 'none') // hover lives on the glass circle above
 
-  entityRing
-    .selectAll('circle.entity-node')
-    .data(clusterNodes)
-    .join('circle')
+  summaries
+    .append('circle')
     .attr('class', 'entity-node')
-    .attr('cx', (d) => d.x || 0)
-    .attr('cy', (d) => d.y || 0)
     .attr('r', nodeRadius)
     .attr('fill', `url(#${glass.gradientId})`)
     .attr('stroke', glass.stroke)
@@ -147,38 +159,31 @@ export function renderEntityRing(
   // bridge (renderClusterEntityBridge.ts) — nothing renders beside the node.
   const connectionCounts = _config.connectionCounts
 
-  clusterNodes.forEach((node) => {
-    const connectionCount = connectionCounts?.get(node.id) ?? 0
+  // Faint inner highlight ring — the SVG stand-in for the Figma
+  // `box-shadow: 0 0 1px rgba(255,255,255,.10) inset`
+  summaries
+    .append('circle')
+    .attr('class', 'entity-node-highlight')
+    .attr('r', nodeRadius - glass.innerHighlightWidth)
+    .attr('fill', 'none')
+    .attr('stroke', glass.innerHighlight)
+    .attr('stroke-width', glass.innerHighlightWidth)
+    .style('pointer-events', 'none')
 
-    // Faint inner highlight ring — the SVG stand-in for the Figma
-    // `box-shadow: 0 0 1px rgba(255,255,255,.10) inset`
-    // (datum bound so hover isolation can dim it with its node)
-    entityRing
-      .append('circle')
-      .datum(node)
-      .attr('class', 'entity-node-highlight')
-      .attr('cx', node.x || 0)
-      .attr('cy', node.y || 0)
-      .attr('r', nodeRadius - glass.innerHighlightWidth)
-      .attr('fill', 'none')
-      .attr('stroke', glass.innerHighlight)
-      .attr('stroke-width', glass.innerHighlightWidth)
-      .style('pointer-events', 'none')
-
-    entityRing
-      .append('text')
-      .datum(node)
-      .attr('class', 'entity-count')
-      .attr('text-anchor', 'middle')
-      .attr('dominant-baseline', 'middle')
-      .attr('x', node.x || 0)
-      .attr('y', node.y || 0)
-      .attr('font-size', ENTITY_RING.count.fontSize)
-      .attr('font-weight', ENTITY_RING.count.fontWeight)
-      .attr('font-family', ENTITY_RING.count.fontFamily)
-      .attr('fill', ENTITY_RING.count.fill)
-      // Decorative overlay: must never swallow the circle's hover events
-      .style('pointer-events', 'none')
-      .text(connectionCount)
-  })
+  // The count sits at the group's own origin — dead centre of the circle by
+  // construction, at every ring position and after any pin or rotation.
+  summaries
+    .append('text')
+    .attr('class', 'entity-count')
+    .attr('text-anchor', 'middle')
+    .attr('dominant-baseline', 'middle')
+    .attr('x', 0)
+    .attr('y', 0)
+    .attr('font-size', ENTITY_RING.count.fontSize)
+    .attr('font-weight', ENTITY_RING.count.fontWeight)
+    .attr('font-family', ENTITY_RING.count.fontFamily)
+    .attr('fill', ENTITY_RING.count.fill)
+    // Decorative overlay: must never swallow the circle's hover events
+    .style('pointer-events', 'none')
+    .text(d => connectionCounts?.get(d.id) ?? 0)
 }
