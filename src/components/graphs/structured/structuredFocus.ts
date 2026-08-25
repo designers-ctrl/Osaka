@@ -852,14 +852,16 @@ export function createStructuredFocus(viewportGroup: ViewportSelection): Structu
      * end-anchored left), so labels point out of the dense disc instead of
      * colliding across it.
      */
-    const regionX = entry.region?.x ?? 0
-    const side = (d: any) => (d.x >= regionX ? 1 : -1)
+    /*
+     * GLOBAL RULE: entity labels are LEFT-ALIGNED everywhere — `start`
+     * anchored on the dot's right side, in every mode and state.
+     */
     marks.labels
       .attr('opacity', (d: any) => restingLabelOpacityOf(d))
       .attr('font-size', fontSize)
-      .attr('x', (d: any) => d.x + side(d) * (leafR + eLabel.offsetX / cameraK))
+      .attr('x', (d: any) => d.x + leafR + eLabel.offsetX / cameraK)
       .attr('y', (d: any) => d.y)
-      .attr('text-anchor', (d: any) => (side(d) > 0 ? 'start' : 'end'))
+      .attr('text-anchor', 'start')
 
     // The chip: leading dot pinned to the region centre, constant-screen and
     // drawn at the compact Structured scale (see `selection.chipScale`).
@@ -1177,54 +1179,44 @@ export function createStructuredFocus(viewportGroup: ViewportSelection): Structu
      * `__cluster__` and `__region__` resolve in segmentIn.
      */
     /*
-     * ONE LINE PER RELATIONSHIP — and the region gets exactly ONE attachment:
-     * its own cluster. Neither insight leg is drawn by the focus layer any
-     * more: cluster↔insight already exists in the base mesh (lifted to the
-     * active emphasis by the selection pass), and an insight→region connector
-     * restated that same relationship a second way — a duplicate by another
-     * route. Insights stay visible on the ring, their base lines light up,
-     * and the region hangs off its cluster; the only other focus lines are
-     * the Entity↔Entity relations, which exist nowhere else.
+     * ── FOCUS-LAYER CONNECTORS: the rule, line by line ────────────────────
+     *
+     *   Cluster ↔ Cluster    base mesh only (lifted by the selection pass)
+     *   Cluster ↔ Insight    base mesh only (lifted by the selection pass)
+     *   Region  → Insight    never drawn — same relationship as
+     *                        cluster↔insight
+     *   Region ↔ its OWN cluster   exactly ONE subtle tether (below): not a
+     *                        data relationship at all, but the visual anchor
+     *                        that says which ring cluster this region belongs
+     *                        to — one per open cluster, nothing else
+     *   Entity  ↔ Entity     the dashed relation lines — the only other
+     *                        lines this layer draws
+     *
+     * The TETHER runs from the cluster's own representation (the band origin —
+     * the node, whose badge and entity summary sit on the same spoke) to the
+     * region's nearest edge, both ends trimmed by segmentIn. Straight and at
+     * the resting link opacity: an anchor, not an emphasis.
      */
-    const chainLinks = [{ fromId: '__cluster__', toId: '__region__', tier: 'leaf' as const }]
-
-    const linksGroup = group.append('g').attr('class', 'structured-focus-links')
-    const chain = renderStraightConnections(
-      linksGroup,
-      chainLinks,
+    const defsT = group.select('defs')
+    const tetherId = `structured-focus-tether--${model.clusterId}`
+    appendUserSpaceLinkGradient(
+      defsT as any,
+      tetherId,
+      Math.min(0, region.x - region.r),
+      Math.max(0, region.x + region.r),
+    )
+    const tether = renderStraightConnections(
+      group.append('g').attr('class', 'structured-focus-links'),
+      [{ fromId: '__cluster__', toId: '__region__' }],
       (l: any) => segmentIn(entry, l),
       {
         className: 'structured-focus-link',
         zoomScale: cameraK,
-        stroke: `url(#${fgId})`,
-        backgroundStroke: `url(#${bgId})`,
+        stroke: `url(#${tetherId})`,
+        backgroundStroke: `url(#${tetherId})`,
         widthFactor: F.line.widthFactor,
       },
     )
-
-    // Hover highlighting, the same relationship the base graph draws.
-    const focusLines = chain.foreground
-    const focusEndpoints = chain.endpoints
-    const setLineState = (activeKey: string | null) => {
-      if (isolatedLeafId) return
-      const width = getLinkStrokeWidth('default', cameraK) * F.line.widthFactor
-      focusLines
-        .attr('opacity', (l: any) => (activeKey === null
-          ? LINK_STYLING.opacity.base
-          : (`${l.fromId}~${l.toId}` === activeKey ? LINK_STYLING.opacity.hover : LINK_STYLING.opacity.hidden)))
-        .attr('stroke-width', (l: any) => (activeKey !== null && `${l.fromId}~${l.toId}` === activeKey
-          ? width * 1.3
-          : width))
-      focusEndpoints?.attr('opacity', (p: any) => (activeKey === null
-        || `${p.d.fromId}~${p.d.toId}` === activeKey
-        ? LINK_STYLING.endpoints.opacity
-        : 0))
-    }
-    setLineState(null)
-    focusLines
-      .style('pointer-events', 'stroke')
-      .on('mouseenter', (_event: any, l: any) => setLineState(`${l.fromId}~${l.toId}`))
-      .on('mouseleave', () => setLineState(null))
 
     /*
      * NO insight marks here. The chain above already points at the wheel's own
@@ -1319,9 +1311,10 @@ export function createStructuredFocus(viewportGroup: ViewportSelection): Structu
       leafDots,
       labels,
       chip: chipGroup,
-      lineFg: chain.foreground,
-      lineBg: chain.background,
-      lineEnds: chain.endpoints,
+      // The tether — the region's one connector back to its own cluster.
+      lineFg: tether.foreground,
+      lineBg: tether.background,
+      lineEnds: tether.endpoints,
     }
     applyGeometry(entry)
   }
@@ -1372,47 +1365,12 @@ export function createStructuredFocus(viewportGroup: ViewportSelection): Structu
     appendUserSpaceLinkGradient(defs, gradientId, Math.min(...xs), Math.max(...xs))
 
     /*
-     * ── SELECTED CLUSTER ↔ SELECTED CLUSTER ────────────────────────────────
-     * Where two pinned clusters are DIRECTLY linked in the resolved data, that
-     * real relationship is drawn between them at their new anchors. It is not a
-     * new connection: the wheel's own line for it is hidden (below), because it
-     * still points at the ring position the cluster has left. Nothing is drawn
-     * for a pair that has no such edge — relatedness alone does not invent one.
+     * NO cluster↔cluster focus lines. A direct link between two selected
+     * clusters is already a BASE mesh line — both nodes are still on the ring,
+     * so the base line lands exactly on them and the selection pass lifts it
+     * to the active emphasis. A focus copy here stacked a second connector
+     * over the same relationship.
      */
-    const clusterPairs: Array<{ a: string, b: string }> = []
-    for (let i = 0; i < entries.length; i++) {
-      for (let j = i + 1; j < entries.length; j++) {
-        const a = entries[i].model.clusterId
-        const b = entries[j].model.clusterId
-        if (clusterLinks.direct(a, b)) clusterPairs.push({ a, b })
-      }
-    }
-    if (clusterPairs.length) {
-      const clusterRadius = STRUCTURED_NODE_SIZES.cluster / 2
-      renderStraightConnections(
-        relationGroup ?? (relationGroup = detailLayer.append('g').attr('class', 'structured-focus-relations')),
-        clusterPairs,
-        (pair: any) => {
-          const a = slotOf.get(pair.a)!
-          const b = slotOf.get(pair.b)!
-          const dx = b.x - a.x
-          const dy = b.y - a.y
-          const len = Math.hypot(dx, dy) || 1
-          const trim = clusterRadius + F.line.endpointGap / cameraK
-          return {
-            x1: a.x + (dx / len) * trim,
-            y1: a.y + (dy / len) * trim,
-            x2: b.x - (dx / len) * trim,
-            y2: b.y - (dy / len) * trim,
-          }
-        },
-        {
-          className: 'structured-focus-cluster-link',
-          zoomScale: cameraK,
-          widthFactor: F.line.widthFactor,
-        },
-      )
-    }
 
     const radius = Math.max(F.leaf.radius, F.leaf.minVisualRadius / cameraK)
     const pad = F.line.endpointGap / cameraK
@@ -1788,8 +1746,65 @@ export function createStructuredFocus(viewportGroup: ViewportSelection): Structu
     const anchorDist = V.outerRadius + D.regionClearance + maxR
     const groupAnchor = { x: anchorDir.x * anchorDist, y: anchorDir.y * anchorDist }
 
+    /** Distance from point c to segment ab — the connector-crossing test. */
+    const segDist = (c: { x: number, y: number }, a: { x: number, y: number }, b2: { x: number, y: number }) => {
+      const dx = b2.x - a.x
+      const dy = b2.y - a.y
+      const len2 = dx * dx + dy * dy || 1
+      const t = Math.max(0, Math.min(1, ((c.x - a.x) * dx + (c.y - a.y) * dy) / len2))
+      return Math.hypot(c.x - (a.x + t * dx), c.y - (a.y + t * dy))
+    }
+    /** Each placed region's attachment connector (cluster anchor → centre). */
+    const placedConnectors: Array<{ a: { x: number, y: number }, b: { x: number, y: number } }> = []
+    const anchorOfModel = (clusterId: string) => {
+      const rad = ((dirDegOf.get(clusterId) ?? 0) * Math.PI) / 180
+      return { x: Math.cos(rad) * STRUCTURED_RINGS.cluster, y: Math.sin(rad) * STRUCTURED_RINGS.cluster }
+    }
+    /**
+     * STRICT ROW SEPARATION — a hard constraint, not a preference: candidate
+     * centres whose |Δcy| against ANY placed region falls below half the two
+     * regions' mean diameter (`regionRowSepFactor`) are REJECTED outright, so
+     * two open circles can never sit side-by-side on one horizontal line.
+     */
+    const rowSeparated = (c: { x: number, y: number }, r: number) =>
+      placedRegions.every(o =>
+        Math.abs(c.y - o.y) >= (r + o.r) * D.regionRowSepFactor)
+
     models.forEach((model, index) => {
       const r = radiusOfModel.get(model.clusterId)!
+      const own = anchorOfModel(model.clusterId)
+      /*
+       * SCORE a candidate under the stated priority ladder:
+       *   1. overlap / wheel — hard rejects (handled by the caller's filters);
+       *   2. connector crossings — a candidate whose attachment line cuts
+       *      through another region, or whose circle sits on another region's
+       *      attachment line, ranks strictly below any crossing-free one;
+       *   3. shorter connector;
+       *   4. compact grouping — distance to the group anchor, plus a STAGGER
+       *      penalty when the candidate's centre lands on (nearly) the same
+       *      horizontal line as a placed circle, so the group forms a packed
+       *      triangle/diagonal composition instead of a flat row that invites
+       *      lines straight through the middle circle.
+       */
+      const scoreOf = (c: { x: number, y: number }) => {
+        let crossings = 0
+        for (const placedR of placedRegions) {
+          if (segDist(placedR, own, c) < placedR.r + 6) crossings++
+        }
+        for (const conn of placedConnectors) {
+          if (segDist(c, conn.a, conn.b) < r + 6) crossings++
+        }
+        const connectorLen = Math.hypot(c.x - own.x, c.y - own.y)
+        const cost = connectorLen * 0.5
+          + Math.hypot(c.x - groupAnchor.x, c.y - groupAnchor.y)
+        return { crossings, cost }
+      }
+      const better = (
+        m1: { crossings: number, cost: number },
+        m2: { crossings: number, cost: number },
+      ) => m1.crossings < m2.crossings
+        || (m1.crossings === m2.crossings && m1.cost < m2.cost - 1e-6)
+
       let chosen: { x: number, y: number } | null = null
       if (index === 0) {
         // The first region takes the anchor itself, nudged outward only if the
@@ -1803,48 +1818,55 @@ export function createStructuredFocus(viewportGroup: ViewportSelection): Structu
         }
         chosen ??= groupAnchor
       } else {
-        /*
-         * Greedy packing: candidates touch each already-placed circle at fixed
-         * 15° steps; the survivor nearest the GROUP ANCHOR wins — which is what
-         * pulls the group together instead of stringing it out.
-         */
-        let best: { c: { x: number, y: number }, cost: number } | null = null
-        for (const placedR of placedRegions) {
-          for (let deg = 0; deg < 360; deg += 15) {
-            const rad = (deg * Math.PI) / 180
-            const dist = placedR.r + r + D.regionGap + 1
-            const c = {
-              x: placedR.x + Math.cos(rad) * dist,
-              y: placedR.y + Math.sin(rad) * dist,
-            }
-            if (!clearOfPlaced(c, r) || !wheelClear(c, r) || !fitsViewport(c, r)) continue
-            const cost = Math.hypot(c.x - groupAnchor.x, c.y - groupAnchor.y)
-            if (!best || cost < best.cost - 1e-6) best = { c, cost }
-          }
-        }
-        // No candidate satisfied everything: relax the viewport (never the
-        // overlap or the wheel), preferring nearness to the anchor.
-        if (!best) {
+        // A typed holder object rather than a bare local: TS does not track
+        // narrowing through the `consider` closure's mutations.
+        const found: { best: { c: { x: number, y: number }, s: { crossings: number, cost: number } } | null } = { best: null }
+        const consider = (requireViewport: boolean) => {
           for (const placedR of placedRegions) {
-            for (let deg = 0; deg < 360; deg += 15) {
-              const rad = (deg * Math.PI) / 180
-              const dist = placedR.r + r + D.regionGap + 1
-              const c = {
-                x: placedR.x + Math.cos(rad) * dist,
-                y: placedR.y + Math.sin(rad) * dist,
+            /*
+             * Candidates ring each placed circle at SEVERAL distances, from
+             * touching out to a few hundred units — searching genuinely in X
+             * AND Y. The deep ladder matters: with three large regions the
+             * strict row separation plus the wheel's bubble can make every
+             * touching-ring slot illegal, and the only legal positions sit a
+             * band further out (e.g. below-right of the group, past the
+             * wheel's rim). A shallow ladder was exactly how the third region
+             * ended up pushed off-viewport.
+             */
+            for (const distExtra of [1, 60, 140, 240, 340]) {
+              for (let deg = 0; deg < 360; deg += 15) {
+                const rad = (deg * Math.PI) / 180
+                const dist = placedR.r + r + D.regionGap + distExtra
+                const c = {
+                  x: placedR.x + Math.cos(rad) * dist,
+                  y: placedR.y + Math.sin(rad) * dist,
+                }
+                if (!clearOfPlaced(c, r) || !wheelClear(c, r)) continue
+                // The STRICT stagger — never relaxed below.
+                if (!rowSeparated(c, r)) continue
+                if (requireViewport && !fitsViewport(c, r)) continue
+                const sc = scoreOf(c)
+                if (!found.best || better(sc, found.best.s)) found.best = { c, s: sc }
               }
-              if (!clearOfPlaced(c, r) || !wheelClear(c, r)) continue
-              const cost = Math.hypot(c.x - groupAnchor.x, c.y - groupAnchor.y)
-              if (!best || cost < best.cost - 1e-6) best = { c, cost }
             }
           }
         }
-        chosen = best?.c ?? {
-          x: groupAnchor.x + index * (2 * r + D.regionGap),
-          y: groupAnchor.y,
+        consider(true)
+        // No candidate satisfied everything: relax the viewport (never the
+        // overlap, the wheel, or the row separation), same priority ladder.
+        if (!found.best) consider(false)
+        /*
+         * Last-resort fallback — deterministic DIAGONAL steps, never the old
+         * horizontal `index × offset` row: each step moves down-and-across by
+         * a full separation, so even the fallback can't recreate a flat line.
+         */
+        chosen = found.best?.c ?? {
+          x: groupAnchor.x + index * (r + D.regionGap) * (index % 2 === 0 ? 1 : -1),
+          y: groupAnchor.y + index * (2 * r * D.regionRowSepFactor + D.regionGap),
         }
       }
       placedRegions.push({ ...chosen, r })
+      placedConnectors.push({ a: own, b: chosen })
       regionCentreOf.set(model.clusterId, chosen)
     })
 

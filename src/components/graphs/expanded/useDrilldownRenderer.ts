@@ -270,7 +270,14 @@ export function useDrilldownRenderer() {
     // Placement is side-aware — the label sits on the entity's outward side
     // (start-anchored on the right half, end-anchored on the left), so labels
     // point out of the dense disc instead of colliding across its centre.
-    const labelSide = (d: any) => (d.dx >= 0 ? 1 : -1)
+    /*
+     * GLOBAL RULE: every entity label reads LEFT-ALIGNED (`text-anchor:
+     * start`), in every mode and state. The label therefore always sits on
+     * the dot's RIGHT side at first paint; the collision pass below may move
+     * it to another slot, but each slot is itself start-anchored (its box is
+     * unchanged — only where the text begins inside it).
+     */
+    const labelSide = (_d: any) => 1
     const entityLabels = entityGroups.selectAll('text.expanded-entity-label')
       .data((d: DrilldownRegion) => d.entities.map(e => ({ ...e, region: d })))
       .enter()
@@ -918,23 +925,25 @@ export function useDrilldownRenderer() {
           const h = bb.height || labelFontSize
 
           type Candidate = { x: number, y: number, anchor: string, box: LabelBox }
+          /*
+           * Every slot keeps its BOX (the collision geometry is untouched)
+           * but the text inside it is always LEFT-ALIGNED: the anchor is
+           * `start` and x is the box's left edge, whichever side of the dot
+           * the slot sits on — the global entity-label rule.
+           */
           const sideSlot = (side: number, vy: number): Candidate => {
             const x = d.dx + side * labelGap
-            return {
-              x, y: d.dy + vy, anchor: side > 0 ? 'start' : 'end',
-              box: {
-                x1: side > 0 ? x : x - w, x2: side > 0 ? x + w : x,
-                y1: d.dy + vy - h / 2, y2: d.dy + vy + h / 2,
-              },
+            const box = {
+              x1: side > 0 ? x : x - w, x2: side > 0 ? x + w : x,
+              y1: d.dy + vy - h / 2, y2: d.dy + vy + h / 2,
             }
+            return { x: box.x1, y: d.dy + vy, anchor: 'start', box }
           }
           const stackSlot = (dir: number, tier: number = 1): Candidate => {
             const y = d.dy + dir * (dotRadius + EXPANDED_CLUSTER.entityLabel.gap + h / 2
               + (tier - 1) * (h + labelPad))
-            return {
-              x: d.dx, y, anchor: 'middle',
-              box: { x1: d.dx - w / 2, x2: d.dx + w / 2, y1: y - h / 2, y2: y + h / 2 },
-            }
+            const box = { x1: d.dx - w / 2, x2: d.dx + w / 2, y1: y - h / 2, y2: y + h / 2 }
+            return { x: box.x1, y, anchor: 'start', box }
           }
           // Outward side first — external entities keep their perimeter-facing
           // bias — then progressively less preferred slots. The ladder is

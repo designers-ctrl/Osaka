@@ -735,8 +735,27 @@ export const STRUCTURED_FOCUS = {
     regionScale: 1.3,
     /** Hard cap on a focus region's radius (data units). */
     maxRegionRadius: 270,
-    /** Minimum gap kept between two expanded regions (data units). */
-    regionGap: 24,
+    /**
+     * Minimum gap kept between two expanded regions (data units).
+     *
+     * The placement scorer packs toward the group anchor, so whatever this
+     * value is, two neighbouring regions settle at EXACTLY it — the gap is not
+     * a hint, it is the distance the user sees. At 24 the circles cleared each
+     * other by ~9 screen px at the focus camera's scale, which reads as
+     * touching. 64 lands at ~25 screen px: unmistakably separate rings with
+     * their strokes and entity marks clear of each other, still compact enough
+     * that three regions fit the free side of the canvas without the viewport
+     * relaxation ever having to fire.
+     */
+    regionGap: 64,
+    /**
+     * STRICT STAGGER: two open regions may never sit on (nearly) the same
+     * horizontal line. The minimum |Δcy| between two centres is this fraction
+     * of their COMBINED diameters' mean — i.e. ~0.5 × a region diameter, the
+     * middle of the 0.45–0.6 band the design specifies. A hard placement
+     * constraint, not a scoring preference.
+     */
+    regionRowSepFactor: 0.5,
 
     wheel: {
       /*
